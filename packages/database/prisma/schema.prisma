@@ -1,0 +1,780 @@
+// This is your Prisma schema file
+// Learn more: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// AUTHENTICATION & USERS
+// ============================================================================
+
+model User {
+  id                 String    @id @default(uuid())
+  email              String    @unique
+  emailDomain        String    // Extracted from email for whitelisting
+  isActive           Boolean   @default(true)
+  lastLoginAt        DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  
+  // Staff identification (optional, links to employee if user is also an employee)
+  staffId            String?   @unique
+  fullName           String?
+  
+  // Relations
+  roles              UserRole[]
+  sessions           Session[]
+  otpCodes           OtpCode[]
+  auditEvents        AuditEvent[]
+  
+  // Created/Updated tracking
+  cyclesCreated      Cycle[]           @relation("CycleCreatedBy")
+  casesUpdated       AppraisalCase[]   @relation("CaseUpdatedBy")
+  approvalsCreated   CaseApproval[]    @relation("ApprovalCreatedBy")
+  checklistCompleted CaseChecklistItem[] @relation("ChecklistCompletedBy")
+  overridesCreated   ManagerOverride[] @relation("OverrideCreatedBy")
+  contactTypeMappingsCreated ContactTypeMapping[] @relation("MappingCreatedBy")
+  unmappedValuesResolved UnmappedValueEvent[] @relation("UnmappedValueResolver")
+  
+  @@index([email])
+  @@index([staffId])
+  @@map("users")
+}
+
+model Role {
+  id          String   @id @default(uuid())
+  name        String   @unique // ADMIN, HR, FINANCE, PAYROLL, MANAGER, SM, RM
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Relations
+  userRoles   UserRole[]
+  permissions FieldGroupPermission[]
+  
+  @@map("roles")
+}
+
+model UserRole {
+  id        String   @id @default(uuid())
+  userId    String
+  roleId    String
+  assignedAt DateTime @default(now())
+  
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  
+  @@unique([userId, roleId])
+  @@index([userId])
+  @@map("user_roles")
+}
+
+model Session {
+  id           String   @id @default(uuid())
+  userId       String
+  accessToken  String   @unique // Hashed JWT
+  refreshToken String   @unique // Hashed refresh token
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+  lastUsedAt   DateTime @default(now())
+  ipAddress    String?
+  userAgent    String?
+  
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@index([userId])
+  @@index([accessToken])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+model OtpCode {
+  id         String   @id @default(uuid())
+  email      String
+  code       String   // Hashed 6-digit code
+  expiresAt  DateTime
+  verified   Boolean  @default(false)
+  verifiedAt DateTime?
+  attempts   Int      @default(0)
+  createdAt  DateTime @default(now())
+  ipAddress  String?
+  
+  userId String?
+  user   User?  @relation(fields: [userId], references: [id], onDelete: SetNull)
+  
+  @@index([email, verified, expiresAt])
+  @@map("otp_codes")
+}
+
+model EmailDomainWhitelist {
+  id        String   @id @default(uuid())
+  domain    String   @unique
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  @@map("email_domain_whitelist")
+}
+
+// ============================================================================
+// CYCLES
+// ============================================================================
+
+model Cycle {
+  id              String    @id @default(uuid())
+  cycleName       String    // "FY2026 Annual Review"
+  cycleType       CycleType // ANNUAL, ANNIVERSARY, ADHOC
+  fiscalYear      Int?
+  startDate       DateTime
+  endDate         DateTime?
+  lockDate        DateTime?
+  payrollReleaseDate DateTime?
+  status          CycleStatus @default(DRAFT)
+  isActive        Boolean   @default(false)
+  importsLocked   Boolean   @default(false)
+  importsLockedAt DateTime?
+  importsLockedBy String?
+  sealed          Boolean   @default(false)
+  sealedAt        DateTime?
+  sealedBy        String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  createdBy       String?
+  
+  creator         User?                 @relation("CycleCreatedBy", fields: [createdBy], references: [id])
+  
+  // Relations
+  cases           AppraisalCase[]
+  uploadBatches   UploadBatch[]
+  managerOverrides ManagerOverride[]    @relation("CycleSpecificOverrides")
+  computationSnapshots ComputationSnapshot[]
+  
+  @@index([cycleType, status])
+  @@index([status, isActive])
+  @@index([importsLocked])
+  @@index([sealed])
+  @@map("cycles")
+}
+
+enum CycleType {
+  ANNUAL
+  ANNIVERSARY
+  ADHOC
+}
+
+enum CycleStatus {
+  DRAFT
+  ACTIVE
+  LOCKED
+  RELEASED
+}
+
+// ============================================================================
+// APPRAISAL CASES
+// ============================================================================
+
+model AppraisalCase {
+  id                      String      @id @default(uuid())
+  cycleId                 String
+  
+  // Employee identification
+  staffId                 String      // Unique per employee, not per case
+  fullName                String
+  rawContactType          String      // Raw value from intake (e.g., "Ops Staff - Active") - kept for traceability
+  contactType             String      // Mapped/computed value per contact type mapping rules (e.g., "Ops Active")
+  companyName             String
+  staffRole               String      // Used for market benchmark matching
+  startDate               DateTime
+  
+  // Manager mapping from intake (base value)
+  successManagerStaffId   String?
+  relationshipManagerStaffId String?
+  managerStaffIdFromIntake String?
+  
+  // Resolved manager (computed via override precedence)
+  resolvedManagerStaffId  String?     // Computed field, indexed for manager visibility
+  
+  // Status and lifecycle
+  status                  CaseStatus  @default(DRAFT)
+  previousStatus          CaseStatus?
+  isRemoved               Boolean     @default(false)
+  closeDate               DateTime?
+  lockedAt                DateTime?
+  lockedBy                String?
+  effectivityDate         DateTime?
+  effectivityStatus       EffectivityStatus @default(PENDING_EFFECTIVITY)
+  
+  // Flags
+  isMissingBenchmark      Boolean     @default(false)
+  hasOverride             Boolean     @default(false)
+  hasMissingApprovalEvidence Boolean  @default(false)
+  
+  // Tenure (computed from startDate, stored for consistency in exports)
+  tenureMonths            Int?
+  tenureComputedAt        DateTime?
+  
+  // Timestamps
+  createdAt               DateTime    @default(now())
+  updatedAt               DateTime    @updatedAt
+  updatedBy               String?
+  
+  cycle Cycle @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  updater User? @relation("CaseUpdatedBy", fields: [updatedBy], references: [id], onDelete: SetNull)
+  
+  // Relations
+  compensation      CaseCompensation?
+  approvals         CaseApproval[]
+  checklistItems    CaseChecklistItem[]
+  movementLogs      CaseMovementLog[]
+  computationSnapshot ComputationSnapshot?
+  
+  @@unique([cycleId, staffId]) // One case per staff per cycle
+  @@index([cycleId, status])
+  @@index([staffId])
+  @@index([resolvedManagerStaffId])
+  @@index([companyName])
+  @@index([staffRole])
+  @@index([status])
+  @@index([isRemoved])
+  @@index([isMissingBenchmark])
+  @@index([hasOverride])
+  @@map("appraisal_cases")
+}
+
+enum CaseStatus {
+  DRAFT
+  IN_REVIEW
+  BLOCKED
+  APPROVED
+  RELEASED_TO_PAYROLL
+  REMOVED_FROM_SCOPE
+}
+
+enum EffectivityStatus {
+  PENDING_EFFECTIVITY
+  EFFECTIVE
+  HISTORICAL
+}
+
+// ============================================================================
+// CASE COMPENSATION
+// ============================================================================
+
+model CaseCompensation {
+  id        String @id @default(uuid())
+  caseId    String @unique
+  
+  // Current compensation (input via web or upload)
+  currentBaseSalary       Decimal  @default(0) @db.Decimal(12, 2)
+  currentFixedAllowances  Decimal  @default(0) @db.Decimal(12, 2)
+  currentVariableAllowances Decimal @default(0) @db.Decimal(12, 2)
+  currentRecurringBonuses Decimal  @default(0) @db.Decimal(12, 2)
+  currentOnetimeBonuses   Decimal  @default(0) @db.Decimal(12, 2) // Reference only
+  currentTotalCompensation Decimal @default(0) @db.Decimal(12, 2) // Computed
+  
+  // Market benchmark and recommendation (computed, snapshot preserved)
+  benchmarkUsed           Decimal? @db.Decimal(12, 2)
+  catchupPercentUsed      Int?     // 1-100
+  tenureMonthsUsed        Int?
+  tenureComputedAt        DateTime?
+  varianceAmount          Decimal? @db.Decimal(12, 2)
+  variancePercent         Decimal? @db.Decimal(10, 4)
+  recommendedIncreaseAmount Decimal @default(0) @db.Decimal(12, 2)
+  recommendedNewBase      Decimal @default(0) @db.Decimal(12, 2)
+  recommendedAdjustmentPercent Decimal? @db.Decimal(10, 4)
+  
+  // Override
+  isOverride              Boolean  @default(false)
+  overrideReason          String?
+  overrideApprovedBy      String?
+  overrideApprovedAt      DateTime?
+  
+  // Approved compensation (final values for payroll)
+  approvedNewBaseSalary   Decimal? @db.Decimal(12, 2)
+  approvedFixedAllowances Decimal? @db.Decimal(12, 2)
+  approvedVariableAllowances Decimal? @db.Decimal(12, 2)
+  approvedRecurringBonuses Decimal? @db.Decimal(12, 2)
+  approvedTotalCompensation Decimal? @db.Decimal(12, 2) // Computed
+  approvedAmountDifference Decimal? @db.Decimal(12, 2)
+  approvedPercentDifference Decimal? @db.Decimal(10, 4)
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  case AppraisalCase @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  
+  @@index([caseId])
+  @@map("case_compensation")
+}
+
+// ============================================================================
+// COMPUTATION SNAPSHOTS
+// ============================================================================
+
+model ComputationSnapshot {
+  id        String @id @default(uuid())
+  cycleId   String
+  caseId    String @unique
+  
+  // Frozen snapshot of recommendation at time of snapshot
+  benchmarkUsed           Decimal  @db.Decimal(12, 2)
+  catchupPercentUsed      Int
+  tenureMonthsUsed        Int
+  varianceAmount          Decimal  @db.Decimal(12, 2)
+  variancePercent         Decimal? @db.Decimal(10, 4)
+  recommendedIncreaseAmount Decimal @db.Decimal(12, 2)
+  recommendedNewBase      Decimal  @db.Decimal(12, 2)
+  recommendedAdjustmentPercent Decimal? @db.Decimal(10, 4)
+  
+  createdAt DateTime @default(now())
+  
+  cycle Cycle @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  case  AppraisalCase @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  
+  @@index([cycleId])
+  @@index([caseId])
+  @@map("computation_snapshots")
+}
+
+// ============================================================================
+// APPROVALS & EVIDENCE
+// ============================================================================
+
+model CaseApproval {
+  id            String   @id @default(uuid())
+  caseId        String
+  
+  approvalType  String   @default("EMAIL") // EMAIL, MEETING, VERBAL, etc.
+  status        ApprovalStatus @default(PENDING)
+  approvalDate  DateTime?
+  approvedByName String?
+  notes         String?
+  
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  createdBy     String
+  
+  case    AppraisalCase @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  creator User          @relation("ApprovalCreatedBy", fields: [createdBy], references: [id])
+  
+  // Relations
+  attachments ApprovalAttachment[]
+  
+  @@index([caseId])
+  @@index([status])
+  @@map("case_approvals")
+}
+
+enum ApprovalStatus {
+  PENDING
+  RECEIVED
+  VERIFIED
+}
+
+model ApprovalAttachment {
+  id         String   @id @default(uuid())
+  approvalId String
+  
+  attachmentType AttachmentType // UPLOAD or DRIVE_LINK
+  
+  // For UPLOAD type
+  storageKey     String?  // S3 key or local path
+  fileName       String?
+  fileSize       Int?
+  mimeType       String?
+  checksum       String?
+  
+  // For DRIVE_LINK type
+  driveUrl       String?
+  
+  createdAt DateTime @default(now())
+  
+  approval CaseApproval @relation(fields: [approvalId], references: [id], onDelete: Cascade)
+  
+  @@index([approvalId])
+  @@map("approval_attachments")
+}
+
+enum AttachmentType {
+  UPLOAD
+  DRIVE_LINK
+}
+
+// ============================================================================
+// CHECKLIST
+// ============================================================================
+
+model CaseChecklistItem {
+  id          String   @id @default(uuid())
+  caseId      String
+  
+  itemKey     String   // HR_REVIEW, MANAGER_REVIEW, FINANCE_APPROVAL, etc.
+  assignedRole String  // ADMIN, HR, FINANCE, PAYROLL, MANAGER
+  
+  completed   Boolean  @default(false)
+  completedBy String?
+  completedAt DateTime?
+  
+  createdAt   DateTime @default(now())
+  
+  case      AppraisalCase @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  completer User?         @relation("ChecklistCompletedBy", fields: [completedBy], references: [id], onDelete: SetNull)
+  
+  @@unique([caseId, itemKey])
+  @@index([caseId])
+  @@index([assignedRole, completed])
+  @@map("case_checklist_items")
+}
+
+// ============================================================================
+// MOVEMENT LOGS
+// ============================================================================
+
+model CaseMovementLog {
+  id        String   @id @default(uuid())
+  caseId    String
+  
+  movementType MovementType
+  fieldName    String?  // For FIELD_CHANGE: "manager_staff_id", "company_name", etc.
+  oldValue     String?
+  newValue     String?
+  
+  timestamp DateTime @default(now())
+  
+  case AppraisalCase @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  
+  @@index([caseId, timestamp])
+  @@map("case_movement_logs")
+}
+
+enum MovementType {
+  ADDED
+  REMOVED
+  RE_ADDED
+  FIELD_CHANGE
+}
+
+// ============================================================================
+// UPLOADS
+// ============================================================================
+
+model UploadBatch {
+  id                String   @id @default(uuid())
+  cycleId           String
+  uploadType        UploadType
+  
+  fileName          String
+  uploadedBy        String
+  uploadedAt        DateTime @default(now())
+  
+  totalRows         Int
+  importedCount     Int      @default(0)
+  flaggedCount      Int      @default(0)
+  errorCount        Int      @default(0)
+  
+  // Movement counts (intake uploads only)
+  addedCount        Int?
+  removedCount      Int?
+  readdedCount      Int?
+  updatedCount      Int?
+  
+  processingStatus  ProcessingStatus @default(PENDING)
+  processedAt       DateTime?
+  errorMessage      String?
+  
+  cycle Cycle @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  
+  // Relations
+  rowResults UploadRowResult[]
+  
+  @@index([cycleId, uploadType])
+  @@index([uploadedAt])
+  @@map("upload_batches")
+}
+
+enum UploadType {
+  INTAKE
+  COMPENSATION
+}
+
+enum ProcessingStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+model UploadRowResult {
+  id        String   @id @default(uuid())
+  batchId   String
+  
+  rowNumber Int
+  status    RowStatus
+  flags     String[] // Array of flag codes: DUPLICATE_STAFF_ID, MISSING_NAME, UNMAPPED_CONTACT_TYPE, etc.
+  errorMessage String?
+  rawData   Json     // Store original row data for reporting (enables questionable-data export)
+  
+  createdAt DateTime @default(now())
+  
+  batch UploadBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  
+  @@index([batchId, status])
+  @@map("upload_row_results")
+}
+
+enum RowStatus {
+  IMPORTED
+  FLAGGED
+  ERROR
+}
+
+// ============================================================================
+// CONTACT TYPE MAPPINGS (Dynamic mapping management)
+// ============================================================================
+
+model ContactTypeMapping {
+  id           String   @id @default(uuid())
+  rawValue     String   @unique  // e.g., "Ops Staff - Active"
+  mappedValue  String             // e.g., "Ops Active" (one of the standard outputs)
+  status       MappingStatus @default(ACTIVE) // ACTIVE, DISABLED
+  
+  createdBy    String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  
+  creator User @relation("MappingCreatedBy", fields: [createdBy], references: [id], onDelete: Restrict)
+  
+  @@index([rawValue])
+  @@index([status])
+  @@map("contact_type_mappings")
+}
+
+enum MappingStatus {
+  ACTIVE
+  DISABLED
+}
+
+model UnmappedValueEvent {
+  id                  String   @id @default(uuid())
+  fieldName           String   // e.g., "contact_type"
+  rawValue            String
+  
+  firstSeenUploadId   String
+  lastSeenUploadId    String
+  occurrencesCount    Int      @default(1)
+  
+  status              UnmappedStatus @default(OPEN) // OPEN, RESOLVED, IGNORED
+  resolvedBy          String?
+  resolvedAt          DateTime?
+  
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  
+  resolver User? @relation("UnmappedValueResolver", fields: [resolvedBy], references: [id], onDelete: SetNull)
+  
+  @@unique([fieldName, rawValue])
+  @@index([status])
+  @@index([fieldName, rawValue])
+  @@map("unmapped_value_events")
+}
+
+enum UnmappedStatus {
+  OPEN
+  RESOLVED
+  IGNORED
+}
+
+// ============================================================================
+// MARKET RULES ENGINE
+// ============================================================================
+
+model TenureBand {
+  id          String   @id @default(uuid())
+  name        String   @unique // "0-6 months", "6-12 months", "1-2 years", etc.
+  minMonths   Int
+  maxMonths   Int
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Relations
+  benchmarks MarketBenchmark[]
+  
+  @@index([minMonths, maxMonths])
+  @@map("tenure_bands")
+}
+
+model MarketBenchmark {
+  id              String   @id @default(uuid())
+  staffRole       String
+  tenureBandId    String
+  
+  baseSalary      Decimal  @db.Decimal(12, 2)
+  catchupPercent  Int?     // 1-100, overrides global default if set
+  
+  isActive        Boolean  @default(true)
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  tenureBand TenureBand @relation(fields: [tenureBandId], references: [id], onDelete: Cascade)
+  
+  @@unique([staffRole, tenureBandId])
+  @@index([staffRole])
+  @@index([tenureBandId])
+  @@map("market_benchmarks")
+}
+
+model GlobalSettings {
+  id                        String   @id @default(uuid())
+  key                       String   @unique
+  value                     String
+  description               String?
+  
+  updatedAt                 DateTime @updatedAt
+  
+  @@map("global_settings")
+}
+
+// Key entries:
+// - DEFAULT_CATCHUP_PERCENT: "75"
+// - ALLOWED_EMAIL_DOMAINS: "company.com,partner.com"
+
+// ============================================================================
+// MANAGER OVERRIDES
+// ============================================================================
+
+model ManagerOverride {
+  id                  String   @id @default(uuid())
+  employeeStaffId     String
+  managerStaffId      String
+  
+  scope               OverrideScope
+  cycleId             String?  // Required if scope = CYCLE
+  
+  previousManagerStaffId String? // For audit trail
+  
+  createdAt           DateTime @default(now())
+  createdBy           String
+  
+  cycle   Cycle? @relation("CycleSpecificOverrides", fields: [cycleId], references: [id], onDelete: Cascade)
+  creator User   @relation("OverrideCreatedBy", fields: [createdBy], references: [id])
+  
+  @@unique([employeeStaffId, scope, cycleId]) // Prevent duplicate overrides
+  @@index([employeeStaffId])
+  @@index([scope, cycleId])
+  @@map("manager_overrides")
+}
+
+enum OverrideScope {
+  GLOBAL
+  CYCLE
+}
+
+// ============================================================================
+// PERMISSIONS
+// ============================================================================
+
+model FieldGroup {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  description String?
+  fields      String[] // Array of field keys: ["current_base_salary", "current_fixed_allowances"]
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Relations
+  permissions FieldGroupPermission[]
+  
+  @@map("field_groups")
+}
+
+model FieldGroupPermission {
+  id           String   @id @default(uuid())
+  fieldGroupId String
+  roleId       String
+  
+  canView      Boolean  @default(false)
+  canEdit      Boolean  @default(false)
+  
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  
+  fieldGroup FieldGroup @relation(fields: [fieldGroupId], references: [id], onDelete: Cascade)
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  
+  @@unique([fieldGroupId, roleId])
+  @@index([roleId])
+  @@map("field_group_permissions")
+}
+
+// ============================================================================
+// AUDIT EVENTS
+// ============================================================================
+
+model AuditEvent {
+  id          String   @id @default(uuid())
+  entityType  String   // CYCLE, CASE, APPROVAL, CHECKLIST, OVERRIDE, etc.
+  entityId    String
+  action      String   // CREATED, UPDATED, DELETED, STATUS_CHANGED, LOCKED, SEALED, etc.
+  
+  actorId     String?
+  actorEmail  String?
+  actorName   String?
+  
+  before      Json?    // Previous state
+  after       Json?    // New state
+  changes     Json?    // Diff object
+  
+  ipAddress   String?
+  userAgent   String?
+  
+  createdAt   DateTime @default(now())
+  
+  actor User? @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  
+  @@index([entityType, entityId, createdAt])
+  @@index([actorId])
+  @@index([createdAt])
+  @@map("audit_events")
+}
+
+// ============================================================================
+// NOTIFICATIONS
+// ============================================================================
+
+model NotificationQueue {
+  id            String   @id @default(uuid())
+  recipientEmail String
+  recipientName  String?
+  subject       String
+  body          String
+  
+  type          String   // OTP, CHECKLIST_REMINDER, APPROVAL_REQUIRED, etc.
+  priority      Int      @default(5) // 1-10, lower = higher priority
+  
+  status        NotificationStatus @default(PENDING)
+  sentAt        DateTime?
+  failedAt      DateTime?
+  errorMessage  String?
+  retryCount    Int      @default(0)
+  
+  createdAt     DateTime @default(now())
+  
+  @@index([status, priority, createdAt])
+  @@map("notification_queue")
+}
+
+enum NotificationStatus {
+  PENDING
+  SENT
+  FAILED
+}
+

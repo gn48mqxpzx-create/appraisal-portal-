@@ -1,0 +1,3 @@
+-- Initial migration placeholder.
+-- Generate actual SQL with:
+-- npm run prisma:migrate:dev -- --name init

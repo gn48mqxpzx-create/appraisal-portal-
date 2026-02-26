@@ -1,0 +1,27 @@
+{
+  "name": "appraisal-portal",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev --workspace apps/api\" \"npm run dev --workspace apps/web\"",
+    "dev:api": "npm run dev --workspace apps/api",
+    "dev:web": "npm run dev --workspace apps/web",
+    "build": "npm run build --workspace packages/shared && npm run build --workspace packages/database && npm run build --workspace apps/api && npm run build --workspace apps/web",
+    "prisma:generate": "npm run prisma:generate --workspace packages/database",
+    "prisma:migrate:dev": "npm run prisma:migrate:dev --workspace packages/database",
+    "prisma:studio": "npm run prisma:studio --workspace packages/database",
+    "docker:up": "docker compose up -d",
+    "docker:down": "docker compose down"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  }
+}
