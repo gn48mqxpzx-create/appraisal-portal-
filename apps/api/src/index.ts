@@ -754,6 +754,357 @@ app.get("/intake/derived-options", (_req, res) => {
   });
 });
 
+// Helper: Normalize name for matching (trim, lowercase, collapse multiple spaces)
+const normalizeName = (name: string | null | undefined): string => {
+  if (!name) return "";
+  return name.trim().toLowerCase().replace(/\s+/g, " ");
+};
+
+// Helper: Extract viewer identification from req.user or query params
+const getViewer = (req: Request): { name: string; role: string } | null => {
+  // Priority 1: req.user (from future auth implementation)
+  if ((req as any).user?.fullName && (req as any).user?.role) {
+    return {
+      name: (req as any).user.fullName,
+      role: (req as any).user.role
+    };
+  }
+
+  // Priority 2: Query params (temporary)
+  const viewerName = (req.query.viewerName as string)?.trim();
+  const viewerRole = (req.query.viewerRole as string)?.trim().toUpperCase();
+
+  if (!viewerRole) {
+    return null;
+  }
+
+  const allowedRoles = ["ADMIN", "SM", "RM"];
+  if (!allowedRoles.includes(viewerRole)) {
+    return null;
+  }
+
+  // For SM and RM, viewerName is required
+  if ((viewerRole === "SM" || viewerRole === "RM") && !viewerName) {
+    return null;
+  }
+
+  return { name: viewerName || "", role: viewerRole };
+};
+
+// Helper: Build access control where clause based on viewer role
+const buildAccessWhereClause = (viewer: { name: string; role: string }): any => {
+  if (viewer.role === "ADMIN") {
+    // Admins see all cases
+    return {};
+  }
+
+  const normalizedViewerName = normalizeName(viewer.name);
+
+  if (viewer.role === "SM") {
+    // Success Managers see only cases where they are the success manager
+    // Match using raw SQL since Prisma doesn't support case-insensitive normalized comparison
+    // We'll need to filter in-memory or use raw query
+    // For now, use a workaround with case-insensitive contains
+    return {
+      successManagerStaffId: {
+        mode: "insensitive" as any,
+        equals: viewer.name
+      }
+    };
+  }
+
+  if (viewer.role === "RM") {
+    // Relationship Managers see cases where they are the relationship manager
+    return {
+      relationshipManagerStaffId: {
+        mode: "insensitive" as any,
+        equals: viewer.name
+      }
+    };
+  }
+
+  // Default: no access
+  return { id: { equals: "no-access" } };
+};
+
+// GET /cases - List cases with pagination, filtering, and access control
+app.get("/cases", async (req: Request, res: Response) => {
+  try {
+    const activeCycle = await ensureActiveCycle();
+
+    // Get viewer identification
+    const viewer = getViewer(req);
+    if (!viewer) {
+      return res.status(400).json({
+        success: false,
+        error: {
+          message: "Missing required query parameters: viewerRole (ADMIN, SM, RM) and viewerName (for SM/RM)"
+        }
+      });
+    }
+
+    // Pagination parameters (safe defaults)
+    const page = Math.max(1, parseInt(req.query.page as string) || 1);
+    const pageSize = Math.max(1, Math.min(100, parseInt(req.query.pageSize as string) || 20));
+    const skip = (page - 1) * pageSize;
+
+    // Filter parameters
+    const status = (req.query.status as string)?.trim();
+    const search = (req.query.search as string)?.trim();
+    const staffRole = (req.query.staffRole as string)?.trim();
+    const contactType = (req.query.contactType as string)?.trim();
+    const includeRemoved = req.query.includeRemoved === "true";
+
+    // Build where clause
+    const whereClause: any = {
+      cycleId: activeCycle.id
+    };
+
+    // Add removal filter
+    if (!includeRemoved) {
+      whereClause.isRemoved = false;
+    }
+
+    // Add access control filter
+    const accessClause = buildAccessWhereClause(viewer);
+    Object.assign(whereClause, accessClause);
+
+    // Add status filter
+    if (status) {
+      whereClause.status = status;
+    }
+
+    // Add staff role filter
+    if (staffRole) {
+      whereClause.staffRole = { contains: staffRole, mode: "insensitive" };
+    }
+
+    // Add contact type filter
+    if (contactType) {
+      whereClause.contactType = { contains: contactType, mode: "insensitive" };
+    }
+
+    // Add search filter (staff_id or full_name)
+    if (search) {
+      whereClause.OR = [
+        { staffId: { contains: search, mode: "insensitive" } },
+        { fullName: { contains: search, mode: "insensitive" } }
+      ];
+    }
+
+    // Fetch all cases matching where clause (for name normalization filtering)
+    let allCases = await prisma.appraisalCase.findMany({
+      where: whereClause,
+      select: {
+        id: true,
+        staffId: true,
+        fullName: true,
+        staffRole: true,
+        contactType: true,
+        successManagerStaffId: true,
+        relationshipManagerStaffId: true,
+        status: true,
+        createdAt: true,
+        updatedAt: true,
+        closeDate: true
+      },
+      orderBy: [
+        { updatedAt: "desc" },
+        { fullName: "asc" }
+      ]
+    });
+
+    // Apply normalized name filtering for SM/RM if needed
+    if (viewer.role === "SM" || viewer.role === "RM") {
+      const normalizedViewerName = normalizeName(viewer.name);
+      allCases = allCases.filter((c) => {
+        const managerName = viewer.role === "SM" 
+          ? c.successManagerStaffId 
+          : c.relationshipManagerStaffId;
+        return normalizeName(managerName) === normalizedViewerName;
+      });
+    }
+
+    // Get total count after filtering
+    const total = allCases.length;
+
+    // Apply pagination
+    const cases = allCases.slice(skip, skip + pageSize);
+
+    const items = cases.map((c) => ({
+      id: c.id,
+      staff_id: c.staffId,
+      full_name: c.fullName,
+      staff_role: c.staffRole,
+      contact_type: c.contactType,
+      success_manager: c.successManagerStaffId,
+      relationship_manager: c.relationshipManagerStaffId,
+      status: c.status,
+      created_at: c.createdAt,
+      updated_at: c.updatedAt,
+      closed_at: c.closeDate
+    }));
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        items,
+        total,
+        page,
+        pageSize
+      }
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: {
+        message: error instanceof Error ? error.message : "Failed to fetch cases"
+      }
+    });
+  }
+});
+
+// GET /cases/:id - Get case detail with movement log and access control
+app.get("/cases/:id", async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const activeCycle = await ensureActiveCycle();
+
+    // Get viewer identification
+    const viewer = getViewer(req);
+    if (!viewer) {
+      return res.status(400).json({
+        success: false,
+        error: {
+          message: "Missing required query parameters: viewerRole (ADMIN, SM, RM) and viewerName (for SM/RM)"
+        }
+      });
+    }
+
+    const appraisalCase = await prisma.appraisalCase.findFirst({
+      where: {
+        id,
+        cycleId: activeCycle.id
+      },
+      select: {
+        id: true,
+        staffId: true,
+        fullName: true,
+        staffRole: true,
+        contactType: true,
+        successManagerStaffId: true,
+        relationshipManagerStaffId: true,
+        status: true,
+        createdAt: true,
+        updatedAt: true,
+        closeDate: true,
+        movementLogs: {
+          select: {
+            id: true,
+            movementType: true,
+            fieldName: true,
+            oldValue: true,
+            newValue: true,
+            timestamp: true
+          },
+          orderBy: {
+            timestamp: "desc"
+          }
+        }
+      }
+    });
+
+    if (!appraisalCase) {
+      return res.status(404).json({
+        success: false,
+        error: {
+          message: `Case with ID ${id} not found or you do not have access to it`
+        }
+      });
+    }
+
+    // Apply access control check using normalized names
+    if (viewer.role === "SM") {
+      const normalizedViewerName = normalizeName(viewer.name);
+      const normalizedManagerName = normalizeName(appraisalCase.successManagerStaffId);
+      if (normalizedViewerName !== normalizedManagerName) {
+        return res.status(404).json({
+          success: false,
+          error: {
+            message: `Case with ID ${id} not found or you do not have access to it`
+          }
+        });
+      }
+    } else if (viewer.role === "RM") {
+      const normalizedViewerName = normalizeName(viewer.name);
+      const normalizedManagerName = normalizeName(appraisalCase.relationshipManagerStaffId);
+      if (normalizedViewerName !== normalizedManagerName) {
+        return res.status(404).json({
+          success: false,
+          error: {
+            message: `Case with ID ${id} not found or you do not have access to it`
+          }
+        });
+      }
+    }
+
+    const caseData = {
+      id: appraisalCase.id,
+      staff_id: appraisalCase.staffId,
+      full_name: appraisalCase.fullName,
+      staff_role: appraisalCase.staffRole,
+      contact_type: appraisalCase.contactType,
+      success_manager: appraisalCase.successManagerStaffId,
+      relationship_manager: appraisalCase.relationshipManagerStaffId,
+      status: appraisalCase.status,
+      created_at: appraisalCase.createdAt,
+      updated_at: appraisalCase.updatedAt,
+      closed_at: appraisalCase.closeDate,
+      movement_log: appraisalCase.movementLogs.map((log) => ({
+        id: log.id,
+        movement_type: log.movementType,
+        field_name: log.fieldName,
+        old_value: log.oldValue,
+        new_value: log.newValue,
+        timestamp: log.timestamp
+      }))
+    };
+
+    return res.status(200).json({
+      success: true,
+      data: caseData
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: {
+        message: error instanceof Error ? error.message : "Failed to fetch case detail"
+      }
+    });
+  }
+});
+
+// Temporary debug endpoint: shows if appraisal cases exist in DB
+app.get("/debug-cases", async (req, res) => {
+  try {
+    const cases = await prisma.appraisalCase.findMany({
+      take: 5,
+    });
+
+    return res.json({
+      success: true,
+      count: cases.length,
+      sample: cases,
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({
+      success: false,
+      message: "Debug failed",
+    });
+  }
+});
+
 app.listen(port, () => {
   console.log(`API listening on http://localhost:${port}`);
 });
