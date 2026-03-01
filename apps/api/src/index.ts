@@ -5,7 +5,7 @@ import multer from "multer";
 import { parse } from "csv-parse/sync";
 import { PrismaClient } from "@prisma/client";
 const prisma = new PrismaClient();
-import { CycleStatus, CycleType, MovementType, ProcessingStatus, RowStatus, UploadType } from "@prisma/client";
+import { CycleStatus, CycleType, MovementType, ProcessingStatus, RowStatus, UploadType, EvidenceType, PayrollStatus } from "@prisma/client";
 import {
   EmployeeDerivedDataService,
   type AttritionCategory,
@@ -906,7 +906,29 @@ app.get("/cases", async (req: Request, res: Response) => {
         status: true,
         createdAt: true,
         updatedAt: true,
-        closeDate: true
+        closeDate: true,
+        compCurrent: {
+          select: {
+            baseSalary: true
+          }
+        },
+        marketSnapshot: {
+          select: {
+            wsllGateStatus: true
+          }
+        },
+        recommendation: {
+          select: {
+            recommendedNewBase: true
+          }
+        },
+        override: {
+          select: {
+            overrideAmount: true,
+            overridePercent: true,
+            overrideNewBase: true
+          }
+        }
       },
       orderBy: [
         { updatedAt: "desc" },
@@ -932,6 +954,21 @@ app.get("/cases", async (req: Request, res: Response) => {
     const cases = allCases.slice(skip, skip + pageSize);
 
     const items = cases.map((c) => ({
+            const currentBase = Number(c.compCurrent?.baseSalary || 0);
+            let finalNewBase = Number(c.recommendation?.recommendedNewBase || currentBase);
+
+            // Apply override if present
+            if (c.override) {
+              if (c.override.overrideNewBase !== null) {
+                finalNewBase = Number(c.override.overrideNewBase);
+              } else if (c.override.overrideAmount !== null) {
+                finalNewBase = currentBase + Number(c.override.overrideAmount);
+              } else if (c.override.overridePercent !== null) {
+                finalNewBase = currentBase * (1 + Number(c.override.overridePercent));
+              }
+            }
+
+            return {
       id: c.id,
       staff_id: c.staffId,
       full_name: c.fullName,
@@ -942,8 +979,11 @@ app.get("/cases", async (req: Request, res: Response) => {
       status: c.status,
       created_at: c.createdAt,
       updated_at: c.updatedAt,
-      closed_at: c.closeDate
-    }));
+      closed_at: c.closeDate,
+      wsll_gate_status: c.marketSnapshot?.wsllGateStatus || null,
+      final_new_base: finalNewBase
+      };
+    });
 
     return res.status(200).json({
       success: true,
@@ -1101,6 +1141,811 @@ app.get("/debug-cases", async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Debug failed",
+    });
+  }
+});
+
+// ============================================================================
+// MARKET BENCHMARK ADMIN ENDPOINTS
+// ============================================================================
+
+// Create tenure band
+app.post("/market/tenure-bands", express.json(), async (req, res) => {
+  try {
+    const { name, minMonths, maxMonths } = req.body;
+
+    if (!name || minMonths === undefined || maxMonths === undefined) {
+      return res.status(400).json({
+        success: false,
+        error: { message: "name, minMonths, and maxMonths are required" },
+      });
+    }
+
+    const tenureBand = await prisma.tenureBand.create({
+      data: { name, minMonths, maxMonths },
+    });
+
+    return res.status(201).json({ success: true, data: tenureBand });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: { message: error instanceof Error ? error.message : "Failed to create tenure band" },
+    });
+  }
+});
+
+// List tenure bands
+app.get("/market/tenure-bands", async (req, res) => {
+  try {
+    const tenureBands = await prisma.tenureBand.findMany({
+      orderBy: { minMonths: "asc" },
+    });
+
+    return res.status(200).json({ success: true, data: tenureBands });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: { message: error instanceof Error ? error.message : "Failed to fetch tenure bands" },
+    });
+  }
+});
+
+// Create/update single benchmark
+app.post("/market/benchmarks", express.json(), async (req, res) => {
+  try {
+    const { staffRole, tenureBandId, baseSalary, catchupPercent } = req.body;
+
+    if (!staffRole || !tenureBandId || baseSalary === undefined) {
+      return res.status(400).json({
+        success: false,
+        error: { message: "staffRole, tenureBandId, and baseSalary are required" },
+      });
+    }
+
+    const benchmark = await prisma.marketBenchmark.upsert({
+      where: {
+        staffRole_tenureBandId: { staffRole, tenureBandId },
+      },
+      create: {
+        staffRole,
+        tenureBandId,
+        baseSalary,
+        catchupPercent,
+      },
+      update: {
+        baseSalary,
+        catchupPercent,
+      },
+    });
+
+    return res.status(200).json({ success: true, data: benchmark });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: { message: error instanceof Error ? error.message : "Failed to create/update benchmark" },
+    });
+  }
+});
+
+// List benchmarks with filters
+app.get("/market/benchmarks", async (req, res) => {
+  try {
+    const { staffRole, tenureBandId } = req.query;
+
+    const where: any = {};
+    if (staffRole) where.staffRole = staffRole;
+    if (tenureBandId) where.tenureBandId = tenureBandId;
+
+    const benchmarks = await prisma.marketBenchmark.findMany({
+      where,
+      include: { tenureBand: true },
+      orderBy: [{ staffRole: "asc" }],
+    });
+
+    return res.status(200).json({ success: true, data: benchmarks });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: { message: error instanceof Error ? error.message : "Failed to fetch benchmarks" },
+    });
+  }
+});
+
+// Upload benchmarks CSV
+app.post("/market/benchmarks/upload", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        error: { message: "No file uploaded" },
+      });
+    }
+
+    const csvContent = req.file.buffer.toString("utf-8");
+    const rows = parse(csvContent, {
+      columns: true,
+      skip_empty_lines: true,
+      trim: true,
+    });
+
+    const questionableRows: any[] = [];
+    let importedCount = 0;
+
+    for (const [index, row] of rows.entries()) {
+      const staffRole = row["Staff Role"]?.trim();
+      const tenureBandName = row["Tenure Band Name"]?.trim();
+      const baseSalaryStr = row["Benchmark Base Salary"]?.trim();
+      const catchupPercentStr = row["Catch Up Percent"]?.trim();
+
+      const flags: string[] = [];
+
+      if (!staffRole) flags.push("MISSING_STAFF_ROLE");
+      if (!tenureBandName) flags.push("MISSING_TENURE_BAND");
+      if (!baseSalaryStr) flags.push("MISSING_BASE_SALARY");
+
+      const baseSalary = parseFloat(baseSalaryStr);
+      if (isNaN(baseSalary)) flags.push("INVALID_BASE_SALARY");
+
+      let catchupPercent = null;
+      if (catchupPercentStr) {
+        catchupPercent = parseInt(catchupPercentStr, 10);
+        if (isNaN(catchupPercent) || catchupPercent < 1 || catchupPercent > 100) {
+          flags.push("INVALID_CATCHUP_PERCENT");
+        }
+      }
+
+      if (flags.length > 0) {
+        questionableRows.push({ row: index + 2, ...row, flags: flags.join(", ") });
+        continue;
+      }
+
+      // Find tenure band
+      const tenureBand = await prisma.tenureBand.findFirst({
+        where: { name: tenureBandName },
+      });
+
+      if (!tenureBand) {
+        questionableRows.push({
+          row: index + 2,
+          ...row,
+          flags: "TENURE_BAND_NOT_FOUND",
+        });
+        continue;
+      }
+
+      // Upsert benchmark
+      await prisma.marketBenchmark.upsert({
+        where: {
+          staffRole_tenureBandId: {
+            staffRole,
+            tenureBandId: tenureBand.id,
+          },
+        },
+        create: {
+          staffRole,
+          tenureBandId: tenureBand.id,
+          baseSalary,
+          catchupPercent,
+        },
+        update: {
+          baseSalary,
+          catchupPercent,
+        },
+      });
+
+      importedCount++;
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        total: rows.length,
+        imported: importedCount,
+        flagged: questionableRows.length,
+        questionableRows,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: { message: error instanceof Error ? error.message : "Failed to upload benchmarks" },
+    });
+  }
+});
+
+// ============================================================================
+// WSLL UPLOAD ENDPOINT
+// ============================================================================
+
+app.post("/wsll/upload", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        error: { message: "No file uploaded" },
+      });
+    }
+
+    const activeCycle = await ensureActiveCycle();
+    const csvContent = req.file.buffer.toString("utf-8");
+    const rows = parse(csvContent, {
+      columns: true,
+      skip_empty_lines: true,
+      trim: true,
+    });
+
+    const questionableRows: any[] = [];
+    let importedCount = 0;
+
+    for (const [index, row] of rows.entries()) {
+      const staffId = row["Staff ID"]?.trim();
+      const wsllScoreStr = row["WSLL Score"]?.trim();
+      const wsllDateStr = row["WSLL Date"]?.trim();
+
+      const flags: string[] = [];
+
+      if (!staffId) flags.push("MISSING_STAFF_ID");
+      if (!wsllScoreStr) flags.push("MISSING_WSLL_SCORE");
+
+      const wsllScore = parseFloat(wsllScoreStr);
+      if (isNaN(wsllScore)) flags.push("INVALID_WSLL_SCORE");
+
+      let wsllDate = null;
+      if (wsllDateStr) {
+        wsllDate = new Date(wsllDateStr);
+        if (isNaN(wsllDate.getTime())) {
+          flags.push("INVALID_WSLL_DATE");
+          wsllDate = null;
+        }
+      }
+
+      if (flags.length > 0) {
+        questionableRows.push({ row: index + 2, ...row, flags: flags.join(", ") });
+        continue;
+      }
+
+      // Upsert WSLL score
+      await prisma.wsllScore.upsert({
+        where: {
+          cycleId_staffId: {
+            cycleId: activeCycle.id,
+            staffId,
+          },
+        },
+        create: {
+          cycleId: activeCycle.id,
+          staffId,
+          wsllScore,
+          wsllDate,
+        },
+        update: {
+          wsllScore,
+          wsllDate,
+        },
+      });
+
+      importedCount++;
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        total: rows.length,
+        imported: importedCount,
+        flagged: questionableRows.length,
+        questionableRows,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: { message: error instanceof Error ? error.message : "Failed to upload WSLL scores" },
+    });
+  }
+});
+
+// ============================================================================
+// CASE COMPENSATION ENDPOINTS
+// ============================================================================
+
+app.get("/cases/:id/compensation", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const caseRecord = await prisma.appraisalCase.findUnique({
+      where: { id },
+      include: {
+        compCurrent: true,
+        recommendation: true,
+        override: true,
+        marketSnapshot: true,
+        approvalWorkflow: true,
+        approvalEvidence: true,
+        payrollProcessing: true,
+      },
+    });
+
+    if (!caseRecord) {
+      return res.status(404).json({
+        success: false,
+        error: { message: "Case not found" },
+      });
+    }
+
+    return res.status(200).json({ success: true, data: caseRecord });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: { message: error instanceof Error ? error.message : "Failed to fetch compensation data" },
+    });
+  }
+});
+
+app.patch("/cases/:id/compensation/current", express.json(), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { baseSalary, fixedAllowances, variableAllowances, recurringBonuses, onetimeBonuses, updatedBy } = req.body;
+
+    const caseRecord = await prisma.appraisalCase.findUnique({
+      where: { id },
+    });
+
+    if (!caseRecord) {
+      return res.status(404).json({
+        success: false,
+        error: { message: "Case not found" },
+      });
+    }
+
+    // Permission check: ADMIN can always edit, SM/RM can edit only in DRAFT or SITE_LEAD_PENDING
+    // For now, we'll be lenient; implement more robust role checking later
+
+    const totalComp =
+      (baseSalary || 0) +
+      (fixedAllowances || 0) +
+      (variableAllowances || 0) +
+      (recurringBonuses || 0) +
+      (onetimeBonuses || 0);
+
+    const compCurrent = await prisma.caseCompCurrent.upsert({
+      where: { caseId: id },
+      create: {
+        caseId: id,
+        baseSalary: baseSalary || 0,
+        fixedAllowances: fixedAllowances || 0,
+        variableAllowances: variableAllowances || 0,
+        recurringBonuses: recurringBonuses || 0,
+        onetimeBonuses: onetimeBonuses || 0,
+        totalComp,
+        updatedBy,
+      },
+      update: {
+        baseSalary: baseSalary || 0,
+        fixedAllowances: fixedAllowances || 0,
+        variableAllowances: variableAllowances || 0,
+        recurringBonuses: recurringBonuses || 0,
+        onetimeBonuses: onetimeBonuses || 0,
+        totalComp,
+        updatedBy,
+      },
+    });
+
+    return res.status(200).json({ success: true, data: compCurrent });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: { message: error instanceof Error ? error.message : "Failed to update current compensation" },
+    });
+  }
+});
+
+// ============================================================================
+// RECOMMENDATION COMPUTE ENDPOINT
+// ============================================================================
+
+app.post("/cases/:id/recommendation/recompute", express.json(), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { computedBy } = req.body;
+
+    const { computeRecommendation } = await import("./services/recommendationService");
+    const result = await computeRecommendation(id, computedBy);
+
+    return res.status(200).json({ success: true, data: result });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: { message: error instanceof Error ? error.message : "Failed to recompute recommendation" },
+    });
+  }
+});
+
+// ============================================================================
+// OVERRIDE ENDPOINT
+// ============================================================================
+
+app.patch("/cases/:id/override", express.json(), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { overrideAmount, overridePercent, overrideNewBase, overrideReason, overriddenBy } = req.body;
+
+    if (
+      (overrideAmount !== null && overrideAmount !== undefined) ||
+      (overridePercent !== null && overridePercent !== undefined) ||
+      (overrideNewBase !== null && overrideNewBase !== undefined)
+    ) {
+      if (!overrideReason) {
+        return res.status(400).json({
+          success: false,
+          error: { message: "overrideReason is required when setting an override" },
+        });
+      }
+    }
+
+    const override = await prisma.caseOverride.upsert({
+      where: { caseId: id },
+      create: {
+        caseId: id,
+        overrideAmount,
+        overridePercent,
+        overrideNewBase,
+        overrideReason,
+        overriddenBy: overriddenBy || "system",
+      },
+      update: {
+        overrideAmount,
+        overridePercent,
+        overrideNewBase,
+        overrideReason,
+        overriddenBy: overriddenBy || "system",
+        overriddenAt: new Date(),
+      },
+    });
+
+    return res.status(200).json({ success: true, data: override });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: { message: error instanceof Error ? error.message : "Failed to save override" },
+    });
+  }
+});
+
+// ============================================================================
+// APPROVAL WORKFLOW ENDPOINTS
+// ============================================================================
+
+app.post("/cases/:id/send-to-site-lead", express.json(), async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { sendToSiteLead } = await import("./services/approvalWorkflowService");
+    await sendToSiteLead(id);
+
+    return res.status(200).json({ success: true });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: { message: error instanceof Error ? error.message : "Failed to send to site lead" },
+    });
+  }
+});
+
+app.post("/cases/:id/site-lead/approve", express.json(), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { approvedBy, comment } = req.body;
+
+    const { siteLeadApprove } = await import("./services/approvalWorkflowService");
+    await siteLeadApprove(id, approvedBy, comment);
+
+    return res.status(200).json({ success: true });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: { message: error instanceof Error ? error.message : "Failed to approve" },
+    });
+  }
+});
+
+app.post("/cases/:id/site-lead/reject", express.json(), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { rejectedBy, comment } = req.body;
+
+    const { siteLeadReject } = await import("./services/approvalWorkflowService");
+    await siteLeadReject(id, rejectedBy, comment);
+
+    return res.status(200).json({ success: true });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: { message: error instanceof Error ? error.message : "Failed to reject" },
+    });
+  }
+});
+
+app.post("/cases/:id/secure-client-approval", express.json(), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { createdBy } = req.body;
+
+    const { secureClientApproval } = await import("./services/approvalWorkflowService");
+    const result = await secureClientApproval(id, createdBy);
+
+    return res.status(200).json({ success: true, data: result });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: { message: error instanceof Error ? error.message : "Failed to secure client approval" },
+    });
+  }
+});
+
+// Upload approval evidence (PDF)
+app.post("/cases/:id/client-approval/evidence", upload.single("file"), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { uploadedBy, hubspotLink } = req.body;
+
+    let evidence = null;
+
+    if (req.file) {
+      // PDF upload
+      const fs = await import("fs/promises");
+      const path = await import("path");
+      const uploadsDir = path.join(process.cwd(), "uploads", "evidence");
+      await fs.mkdir(uploadsDir, { recursive: true });
+
+      const fileName = `${Date.now()}-${req.file.originalname}`;
+      const filePath = path.join(uploadsDir, fileName);
+      await fs.writeFile(filePath, req.file.buffer);
+
+      evidence = await prisma.approvalEvidence.create({
+        data: {
+          caseId: id,
+          type: EvidenceType.PDF,
+          filePath: `/uploads/evidence/${fileName}`,
+          uploadedBy: uploadedBy || "system",
+        },
+      });
+    } else if (hubspotLink) {
+      // HubSpot link
+      evidence = await prisma.approvalEvidence.create({
+        data: {
+          caseId: id,
+          type: EvidenceType.HUBSPOT_LINK,
+          linkUrl: hubspotLink,
+          uploadedBy: uploadedBy || "system",
+        },
+      });
+    } else {
+      return res.status(400).json({
+        success: false,
+        error: { message: "Either file or hubspotLink must be provided" },
+      });
+    }
+
+    return res.status(201).json({ success: true, data: evidence });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: { message: error instanceof Error ? error.message : "Failed to upload evidence" },
+    });
+  }
+});
+
+app.post("/cases/:id/client-approve", express.json(), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { approvedBy, comment } = req.body;
+
+    const { clientApprove } = await import("./services/approvalWorkflowService");
+    await clientApprove(id, approvedBy, comment);
+
+    return res.status(200).json({ success: true });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: { message: error instanceof Error ? error.message : "Failed to approve client" },
+    });
+  }
+});
+
+// ============================================================================
+// PAYROLL PROCESSING ENDPOINTS
+// ============================================================================
+
+app.post("/cases/:id/payroll/process", express.json(), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { processedBy } = req.body;
+
+    const caseRecord = await prisma.appraisalCase.findUnique({
+      where: { id },
+      include: { payrollProcessing: true },
+    });
+
+    if (!caseRecord) {
+      return res.status(404).json({
+        success: false,
+        error: { message: "Case not found" },
+      });
+    }
+
+    if (caseRecord.status !== "PAYROLL_PENDING") {
+      return res.status(400).json({
+        success: false,
+        error: { message: "Case must be in PAYROLL_PENDING status" },
+      });
+    }
+
+    if (!caseRecord.payrollProcessing?.effectivityDate) {
+      return res.status(400).json({
+        success: false,
+        error: { message: "Effectivity date must be set before processing" },
+      });
+    }
+
+    await prisma.payrollProcessing.update({
+      where: { caseId: id },
+      data: {
+        payrollStatus: PayrollStatus.PROCESSED,
+        processedBy,
+        processedAt: new Date(),
+      },
+    });
+
+    await prisma.appraisalCase.update({
+      where: { id },
+      data: {
+        status: "PAYROLL_PROCESSED",
+      },
+    });
+
+    return res.status(200).json({ success: true });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: { message: error instanceof Error ? error.message : "Failed to process payroll" },
+    });
+  }
+});
+
+app.patch("/cases/:id/payroll/effectivity-date", express.json(), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { effectivityDate } = req.body;
+
+    if (!effectivityDate) {
+      return res.status(400).json({
+        success: false,
+        error: { message: "effectivityDate is required" },
+      });
+    }
+
+    await prisma.payrollProcessing.upsert({
+      where: { caseId: id },
+      create: {
+        caseId: id,
+        effectivityDate: new Date(effectivityDate),
+      },
+      update: {
+        effectivityDate: new Date(effectivityDate),
+      },
+    });
+
+    return res.status(200).json({ success: true });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: { message: error instanceof Error ? error.message : "Failed to set effectivity date" },
+    });
+  }
+});
+
+app.post("/cases/:id/lock", express.json(), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { lockedBy } = req.body;
+
+    const caseRecord = await prisma.appraisalCase.findUnique({
+      where: { id },
+    });
+
+    if (!caseRecord) {
+      return res.status(404).json({
+        success: false,
+        error: { message: "Case not found" },
+      });
+    }
+
+    await prisma.appraisalCase.update({
+      where: { id },
+      data: {
+        status: "LOCKED",
+        lockedBy,
+        lockedAt: new Date(),
+      },
+    });
+
+    return res.status(200).json({ success: true });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: { message: error instanceof Error ? error.message : "Failed to lock case" },
+    });
+  }
+});
+
+// ============================================================================
+// EXPORT ENDPOINT
+// ============================================================================
+
+app.get("/exports/payroll", async (req, res) => {
+  try {
+    const { cycleId, status } = req.query;
+
+    const { generatePayrollExport } = await import("./services/exportService");
+    const rows = await generatePayrollExport(cycleId as string | undefined);
+
+    // Generate CSV
+    const headers = [
+      "staff_id",
+      "full_name",
+      "company_name",
+      "staff_role",
+      "current_base",
+      "final_new_base",
+      "final_increase_amount",
+      "final_increase_percent",
+      "effectivity_date",
+      "approval_reference_summary",
+    ];
+
+    const csvLines = [headers.join(",")];
+    for (const row of rows) {
+      const line = headers.map((h) => row[h] || "").join(",");
+      csvLines.push(line);
+    }
+
+    const csv = csvLines.join("\n");
+
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader("Content-Disposition", "attachment; filename=payroll-export.csv");
+    return res.status(200).send(csv);
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: { message: error instanceof Error ? error.message : "Failed to generate payroll export" },
+    });
+  }
+});
+
+// Update market snapshot WSLL exception request
+app.patch("/cases/:id/wsll-exception", express.json(), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { isWsllExceptionRequested, wsllExceptionNote } = req.body;
+
+    await prisma.caseMarketSnapshot.upsert({
+      where: { caseId: id },
+      create: {
+        caseId: id,
+        isWsllExceptionRequested: isWsllExceptionRequested || false,
+        wsllExceptionNote,
+      },
+      update: {
+        isWsllExceptionRequested: isWsllExceptionRequested || false,
+        wsllExceptionNote,
+      },
+    });
+
+    return res.status(200).json({ success: true });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: { message: error instanceof Error ? error.message : "Failed to update WSLL exception" },
     });
   }
 });

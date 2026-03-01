@@ -2,7 +2,11 @@ import { NavLink } from "react-router-dom";
 
 const navItems = [
   { to: "/dashboard", label: "Dashboard" },
-  { to: "/intake-upload", label: "Intake Upload" }
+  { to: "/intake-upload", label: "Intake Upload" },
+  { to: "/wsll-upload", label: "WSLL Upload" },
+  { to: "/cases", label: "Cases" },
+  { to: "/market", label: "Market Benchmarks" },
+  { to: "/exports", label: "Exports" }
 ];
 
 export function SideNav() {

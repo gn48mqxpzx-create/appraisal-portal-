@@ -13,6 +13,8 @@ type CaseRow = {
   created_at: string;
   updated_at: string;
   closed_at?: string | null;
+  wsll_gate_status?: string | null;
+  final_new_base?: number;
 };
 
 const API_BASE = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
@@ -49,6 +51,15 @@ export function CasesPage() {
     localStorage.setItem(VIEWER_ROLE_KEY, viewerRole);
     localStorage.setItem(VIEWER_NAME_KEY, viewerName);
   }, [viewerRole, viewerName]);
+
+  // Auto-default Contact Type for SM/RM viewers
+  useEffect(() => {
+    if ((viewerRole === "SM" || viewerRole === "RM") && contactType === "") {
+      setContactType("Staff Member - Active");
+      setPage(1);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewerRole]);
 
   const endpoint = useMemo(() => {
     const params = new URLSearchParams();
@@ -318,8 +329,30 @@ export function CasesPage() {
                         <td className="px-4 py-3 text-sm text-gray-700">{c.contact_type ?? "-"}</td>
                         <td className="px-4 py-3 text-sm text-gray-700">{c.success_manager ?? "-"}</td>
                         <td className="px-4 py-3 text-sm text-gray-700">{c.relationship_manager ?? "-"}</td>
+                                                <td className="px-4 py-3">
+                                                  {c.wsll_gate_status ? (
+                                                    <span
+                                                      className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                                                        c.wsll_gate_status === "PASS"
+                                                          ? "bg-green-100 text-green-800"
+                                                          : c.wsll_gate_status === "FAIL"
+                                                          ? "bg-red-100 text-red-800"
+                                                          : "bg-yellow-100 text-yellow-800"
+                                                      }`}
+                                                    >
+                                                      {c.wsll_gate_status}
+                                                    </span>
+                                                  ) : (
+                                                    <span className="text-sm text-gray-400">-</span>
+                                                  )}
+                                                </td>
+                                                <td className="px-4 py-3 text-sm text-gray-700">
+                                                  {c.final_new_base ? `$${Number(c.final_new_base).toFixed(2)}` : "-"}
+                                                </td>
                         <td className="px-4 py-3">
                           <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                                                  <th className="px-4 py-3 text-left text-sm font-semibold text-gray-900">WSLL Gate</th>
+                                                  <th className="px-4 py-3 text-left text-sm font-semibold text-gray-900">Final New Base</th>
                             {c.status}
                           </span>
                         </td>
