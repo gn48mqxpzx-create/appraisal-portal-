@@ -953,35 +953,38 @@ app.get("/cases", async (req: Request, res: Response) => {
     // Apply pagination
     const cases = allCases.slice(skip, skip + pageSize);
 
-    const items = cases.map((c) => ({
-            const currentBase = Number(c.compCurrent?.baseSalary || 0);
-            let finalNewBase = Number(c.recommendation?.recommendedNewBase || currentBase);
+    const items = cases.map((c) => {
+      const currentBase = Number(c.compCurrent?.baseSalary || 0);
+      let finalNewBase = Number(c.recommendation?.recommendedNewBase || currentBase);
 
-            // Apply override if present
-            if (c.override) {
-              if (c.override.overrideNewBase !== null) {
-                finalNewBase = Number(c.override.overrideNewBase);
-              } else if (c.override.overrideAmount !== null) {
-                finalNewBase = currentBase + Number(c.override.overrideAmount);
-              } else if (c.override.overridePercent !== null) {
-                finalNewBase = currentBase * (1 + Number(c.override.overridePercent));
-              }
-            }
+      // Apply override with precedence:
+      // 1) overrideNewBase (highest priority)
+      // 2) overrideAmount
+      // 3) overridePercent (lowest priority)
+      if (c.override) {
+        if (c.override.overrideNewBase !== null) {
+          finalNewBase = Number(c.override.overrideNewBase);
+        } else if (c.override.overrideAmount !== null) {
+          finalNewBase = currentBase + Number(c.override.overrideAmount);
+        } else if (c.override.overridePercent !== null) {
+          finalNewBase = currentBase * (1 + Number(c.override.overridePercent));
+        }
+      }
 
-            return {
-      id: c.id,
-      staff_id: c.staffId,
-      full_name: c.fullName,
-      staff_role: c.staffRole,
-      contact_type: c.contactType,
-      success_manager: c.successManagerStaffId,
-      relationship_manager: c.relationshipManagerStaffId,
-      status: c.status,
-      created_at: c.createdAt,
-      updated_at: c.updatedAt,
-      closed_at: c.closeDate,
-      wsll_gate_status: c.marketSnapshot?.wsllGateStatus || null,
-      final_new_base: finalNewBase
+      return {
+        id: c.id,
+        staff_id: c.staffId,
+        full_name: c.fullName,
+        staff_role: c.staffRole,
+        contact_type: c.contactType,
+        success_manager: c.successManagerStaffId,
+        relationship_manager: c.relationshipManagerStaffId,
+        status: c.status,
+        created_at: c.createdAt,
+        updated_at: c.updatedAt,
+        closed_at: c.closeDate,
+        wsll_gate_status: c.marketSnapshot?.wsllGateStatus || null,
+        final_new_base: finalNewBase
       };
     });
 
@@ -1354,6 +1357,95 @@ app.post("/market/benchmarks/upload", upload.single("file"), async (req, res) =>
 });
 
 // ============================================================================
+// WSLL HELPER FUNCTIONS
+// ============================================================================
+
+/**
+ * Normalize staff ID: trim, uppercase, remove internal spaces.
+ */
+const normalizeStaffId = (raw: string | undefined | null): string => {
+  if (!raw) return "";
+  return raw.trim().toUpperCase().replace(/\s+/g, "");
+};
+
+/**
+ * Parse WSLL score: trim, parseFloat, validate range 0–5, return null if invalid/missing.
+ */
+const parseWsllScore = (raw: string | undefined | null): { score: number | null; isValid: boolean; flagText: string | null } => {
+  if (!raw || !raw.trim()) {
+    return { score: null, isValid: false, flagText: "MISSING_WSLL_SCORE" };
+  }
+
+  const trimmed = raw.trim();
+  const score = parseFloat(trimmed);
+
+  if (isNaN(score)) {
+    return { score: null, isValid: false, flagText: "INVALID_WSLL_SCORE" };
+  }
+
+  if (score < 0 || score > 5) {
+    return { score: null, isValid: false, flagText: "WSLL_SCORE_OUT_OF_RANGE" };
+  }
+
+  return { score, isValid: true, flagText: null };
+};
+
+/**
+ * Parse WSLL date: accepts M/D/YY, MM/DD/YYYY, YYYY-MM-DD, M-D-YYYY.
+ * Returns a UTC Date (no timezone shift). Returns null if invalid/missing (but doesn't flag as error).
+ */
+const parseWsllDate = (raw: string | undefined | null): { date: Date | null; isValid: boolean; flagText: string | null } => {
+  if (!raw || !raw.trim()) {
+    // Missing date is not an error, just return null
+    return { date: null, isValid: true, flagText: null };
+  }
+
+  const trimmed = raw.trim();
+
+  // Try various date formats
+  let month: number | null = null;
+  let day: number | null = null;
+  let year: number | null = null;
+
+  // Try M/D/YY or MM/DD/YYYY or M-D-YYYY
+  const slashDash = /^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$/.exec(trimmed);
+  if (slashDash) {
+    month = parseInt(slashDash[1], 10);
+    day = parseInt(slashDash[2], 10);
+    const yearRaw = parseInt(slashDash[3], 10);
+    // Convert YY to YYYY
+    year = yearRaw < 100 ? 2000 + yearRaw : yearRaw;
+  }
+
+  // Try YYYY-MM-DD
+  const isoish = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(trimmed);
+  if (isoish) {
+    year = parseInt(isoish[1], 10);
+    month = parseInt(isoish[2], 10);
+    day = parseInt(isoish[3], 10);
+  }
+
+  if (month === null || day === null || year === null) {
+    return { date: null, isValid: false, flagText: "INVALID_WSLL_DATE_FORMAT" };
+  }
+
+  // Validate date range
+  if (month < 1 || month > 12 || day < 1 || day > 31) {
+    return { date: null, isValid: false, flagText: "INVALID_WSLL_DATE_FORMAT" };
+  }
+
+  // Create UTC date (Date.UTC avoids timezone shift)
+  const utcDate = new Date(Date.UTC(year, month - 1, day));
+
+  // Verify the date was constructed correctly (e.g., Feb 30 → Mar 2, which is invalid)
+  if (utcDate.getUTCMonth() !== month - 1 || utcDate.getUTCDate() !== day) {
+    return { date: null, isValid: false, flagText: "INVALID_WSLL_DATE_FORMAT" };
+  }
+
+  return { date: utcDate, isValid: true, flagText: null };
+};
+
+// ============================================================================
 // WSLL UPLOAD ENDPOINT
 // ============================================================================
 
@@ -1378,28 +1470,39 @@ app.post("/wsll/upload", upload.single("file"), async (req, res) => {
     let importedCount = 0;
 
     for (const [index, row] of rows.entries()) {
-      const staffId = row["Staff ID"]?.trim();
-      const wsllScoreStr = row["WSLL Score"]?.trim();
-      const wsllDateStr = row["WSLL Date"]?.trim();
+      const staffIdRaw = row["Staff ID"];
+      const wsllScoreRaw = row["WSLL Score"];
+      const wsllDateRaw = row["WSLL Date"];
 
       const flags: string[] = [];
 
-      if (!staffId) flags.push("MISSING_STAFF_ID");
-      if (!wsllScoreStr) flags.push("MISSING_WSLL_SCORE");
-
-      const wsllScore = parseFloat(wsllScoreStr);
-      if (isNaN(wsllScore)) flags.push("INVALID_WSLL_SCORE");
-
-      let wsllDate = null;
-      if (wsllDateStr) {
-        wsllDate = new Date(wsllDateStr);
-        if (isNaN(wsllDate.getTime())) {
-          flags.push("INVALID_WSLL_DATE");
-          wsllDate = null;
-        }
+      // Parse and validate staffId
+      const staffId = normalizeStaffId(staffIdRaw);
+      if (!staffId) {
+        flags.push("MISSING_STAFF_ID");
       }
 
-      if (flags.length > 0) {
+      // Parse and validate wsllScore
+      const { score: wsllScore, isValid: scoreValid, flagText: scoreFlagText } = parseWsllScore(wsllScoreRaw);
+      if (scoreFlagText) {
+        flags.push(scoreFlagText);
+      }
+
+      // Parse and validate wsllDate
+      const { date: wsllDate, isValid: dateValid, flagText: dateFlagText } = parseWsllDate(wsllDateRaw);
+      if (dateFlagText && wsllDateRaw && wsllDateRaw.trim()) {
+        // Only flag if a date was provided but invalid
+        flags.push(dateFlagText);
+      }
+
+      // Blocking errors: MISSING_STAFF_ID and invalid (not just missing) wsll score
+      if (!staffId || !scoreValid) {
+        questionableRows.push({ row: index + 2, ...row, flags: flags.join(", ") });
+        continue;
+      }
+
+      // Non-blocking: invalid date format (still allow upload with null date)
+      if (dateFlagText && wsllDateRaw && wsllDateRaw.trim()) {
         questionableRows.push({ row: index + 2, ...row, flags: flags.join(", ") });
         continue;
       }
@@ -1415,11 +1518,11 @@ app.post("/wsll/upload", upload.single("file"), async (req, res) => {
         create: {
           cycleId: activeCycle.id,
           staffId,
-          wsllScore,
+          wsllScore: wsllScore!,
           wsllDate,
         },
         update: {
-          wsllScore,
+          wsllScore: wsllScore!,
           wsllDate,
         },
       });
