@@ -818,6 +818,54 @@ model WsllScore {
   @@map("wsll_scores")
 }
 
+enum WsllRecordSource {
+  CSV
+  UI
+  API
+}
+
+model WsllRecord {
+  id          String           @id @default(uuid())
+  staffId     String
+  wsllScore   Float
+  wsllDate    DateTime?        @db.Date
+  source      WsllRecordSource
+  uploadedBy  String?
+  uploadedAt  DateTime         @default(now())
+  rawRowJson  Json?
+  flags       String?
+  createdAt   DateTime         @default(now())
+
+  @@index([staffId])
+  @@index([wsllDate, uploadedAt])
+  @@map("wsll_records")
+}
+
+enum MarketValueSource {
+  CSV
+  UI
+  API
+}
+
+model MarketValueGuide {
+  id            String            @id @default(uuid())
+  staffRole     String
+  location      String?
+  band          String?
+  minValue      Float
+  maxValue      Float
+  currency      String            @default("AUD")
+  effectiveDate DateTime          @db.Date
+  source        MarketValueSource
+  uploadedAt    DateTime          @default(now())
+  rawRowJson    Json?
+  createdAt     DateTime          @default(now())
+
+  @@index([staffRole, location, effectiveDate])
+  @@index([effectiveDate])
+  @@map("market_value_guides")
+}
+
 // ============================================================================
 // CASE COMPENSATION CURRENT (Separate from recommendations)
 // ============================================================================

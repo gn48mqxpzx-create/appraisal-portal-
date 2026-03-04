@@ -5,12 +5,24 @@ import multer from "multer";
 import { parse } from "csv-parse/sync";
 import { PrismaClient } from "@prisma/client";
 const prisma = new PrismaClient();
-import { CycleStatus, CycleType, MovementType, ProcessingStatus, RowStatus, UploadType, EvidenceType, PayrollStatus } from "@prisma/client";
+import { CycleStatus, CycleType, MovementType, ProcessingStatus, RowStatus, UploadType, EvidenceType, PayrollStatus, WsllRecordSource, MarketValueSource } from "@prisma/client";
 import {
   EmployeeDerivedDataService,
   type AttritionCategory,
   type TenureBand
 } from "./services/employeeDerivedDataService";
+import { getContactByStaffId, getContactProperties, getContactPropertyByName } from "./services/hubspotService";
+import { HUBSPOT_CONTACT_PROPS } from "./config/hubspotPropertyMap";
+import { getContactByStaffId as getIdentityContactByStaffId, getContactByEmail } from "./hubspot/hubspotService";
+import { toIdentity } from "./hubspot/hubspotIdentityMap";
+import {
+  buildHeaderMap,
+  buildMarketHeaderMap,
+  normalizeWsllRow,
+  normalizeStaffId as normalizeCsvStaffId,
+  parseFlexibleDateToIso,
+  type WsllFlagCode
+} from "./intake/csvNormalize";
 
 const app = express();
 const port = Number(process.env.API_PORT ?? 3001);
@@ -1357,96 +1369,67 @@ app.post("/market/benchmarks/upload", upload.single("file"), async (req, res) =>
 });
 
 // ============================================================================
-// WSLL HELPER FUNCTIONS
+// OPTION 1 IDENTITY ENDPOINTS (HubSpot source of truth)
 // ============================================================================
 
-/**
- * Normalize staff ID: trim, uppercase, remove internal spaces.
- */
-const normalizeStaffId = (raw: string | undefined | null): string => {
-  if (!raw) return "";
-  return raw.trim().toUpperCase().replace(/\s+/g, "");
-};
+app.get("/identity/staff/:staffId", async (req, res) => {
+  try {
+    const normalizedStaffId = normalizeCsvStaffId(req.params.staffId ?? "");
+    if (!normalizedStaffId) {
+      return res.status(400).json({ error: "staffId is required" });
+    }
 
-/**
- * Parse WSLL score: trim, parseFloat, validate range 0–5, return null if invalid/missing.
- */
-const parseWsllScore = (raw: string | undefined | null): { score: number | null; isValid: boolean; flagText: string | null } => {
-  if (!raw || !raw.trim()) {
-    return { score: null, isValid: false, flagText: "MISSING_WSLL_SCORE" };
+    const contact = await getIdentityContactByStaffId(normalizedStaffId);
+    if (!contact) {
+      return res.status(404).json({ error: "Identity not found" });
+    }
+
+    return res.status(200).json(toIdentity(contact));
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    if (errorMessage.includes("Missing HUBSPOT_API_TOKEN")) {
+      return res.status(500).json({
+        error: "Missing HUBSPOT_API_TOKEN. Please set HUBSPOT_API_TOKEN in the API environment."
+      });
+    }
+
+    return res.status(500).json({
+      error: "Failed to fetch identity by staff id",
+      details: errorMessage
+    });
   }
+});
 
-  const trimmed = raw.trim();
-  const score = parseFloat(trimmed);
+app.get("/identity/email/:email", async (req, res) => {
+  try {
+    const email = decodeURIComponent(req.params.email ?? "").trim().toLowerCase();
+    if (!email) {
+      return res.status(400).json({ error: "email is required" });
+    }
 
-  if (isNaN(score)) {
-    return { score: null, isValid: false, flagText: "INVALID_WSLL_SCORE" };
+    const contact = await getContactByEmail(email);
+    if (!contact) {
+      return res.status(404).json({ error: "Identity not found" });
+    }
+
+    return res.status(200).json(toIdentity(contact));
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    if (errorMessage.includes("Missing HUBSPOT_API_TOKEN")) {
+      return res.status(500).json({
+        error: "Missing HUBSPOT_API_TOKEN. Please set HUBSPOT_API_TOKEN in the API environment."
+      });
+    }
+
+    return res.status(500).json({
+      error: "Failed to fetch identity by email",
+      details: errorMessage
+    });
   }
-
-  if (score < 0 || score > 5) {
-    return { score: null, isValid: false, flagText: "WSLL_SCORE_OUT_OF_RANGE" };
-  }
-
-  return { score, isValid: true, flagText: null };
-};
-
-/**
- * Parse WSLL date: accepts M/D/YY, MM/DD/YYYY, YYYY-MM-DD, M-D-YYYY.
- * Returns a UTC Date (no timezone shift). Returns null if invalid/missing (but doesn't flag as error).
- */
-const parseWsllDate = (raw: string | undefined | null): { date: Date | null; isValid: boolean; flagText: string | null } => {
-  if (!raw || !raw.trim()) {
-    // Missing date is not an error, just return null
-    return { date: null, isValid: true, flagText: null };
-  }
-
-  const trimmed = raw.trim();
-
-  // Try various date formats
-  let month: number | null = null;
-  let day: number | null = null;
-  let year: number | null = null;
-
-  // Try M/D/YY or MM/DD/YYYY or M-D-YYYY
-  const slashDash = /^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$/.exec(trimmed);
-  if (slashDash) {
-    month = parseInt(slashDash[1], 10);
-    day = parseInt(slashDash[2], 10);
-    const yearRaw = parseInt(slashDash[3], 10);
-    // Convert YY to YYYY
-    year = yearRaw < 100 ? 2000 + yearRaw : yearRaw;
-  }
-
-  // Try YYYY-MM-DD
-  const isoish = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(trimmed);
-  if (isoish) {
-    year = parseInt(isoish[1], 10);
-    month = parseInt(isoish[2], 10);
-    day = parseInt(isoish[3], 10);
-  }
-
-  if (month === null || day === null || year === null) {
-    return { date: null, isValid: false, flagText: "INVALID_WSLL_DATE_FORMAT" };
-  }
-
-  // Validate date range
-  if (month < 1 || month > 12 || day < 1 || day > 31) {
-    return { date: null, isValid: false, flagText: "INVALID_WSLL_DATE_FORMAT" };
-  }
-
-  // Create UTC date (Date.UTC avoids timezone shift)
-  const utcDate = new Date(Date.UTC(year, month - 1, day));
-
-  // Verify the date was constructed correctly (e.g., Feb 30 → Mar 2, which is invalid)
-  if (utcDate.getUTCMonth() !== month - 1 || utcDate.getUTCDate() !== day) {
-    return { date: null, isValid: false, flagText: "INVALID_WSLL_DATE_FORMAT" };
-  }
-
-  return { date: utcDate, isValid: true, flagText: null };
-};
+});
 
 // ============================================================================
-// WSLL UPLOAD ENDPOINT
+// OPTION 1 WSLL ENDPOINTS (history + normalized CSV)
 // ============================================================================
 
 app.post("/wsll/upload", upload.single("file"), async (req, res) => {
@@ -1454,95 +1437,415 @@ app.post("/wsll/upload", upload.single("file"), async (req, res) => {
     if (!req.file) {
       return res.status(400).json({
         success: false,
-        error: { message: "No file uploaded" },
+        error: { message: "No file uploaded" }
       });
     }
 
-    const activeCycle = await ensureActiveCycle();
-    const csvContent = req.file.buffer.toString("utf-8");
-    const rows = parse(csvContent, {
+    const uploadedBy = typeof req.body?.uploaded_by === "string"
+      ? req.body.uploaded_by
+      : typeof req.body?.uploadedBy === "string"
+        ? req.body.uploadedBy
+        : null;
+
+    const rows = parse(req.file.buffer.toString("utf-8"), {
       columns: true,
       skip_empty_lines: true,
       trim: true,
-    });
+      bom: true
+    }) as Array<Record<string, string>>;
 
-    const questionableRows: any[] = [];
-    let importedCount = 0;
+    if (rows.length === 0) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          total_rows: 0,
+          imported: 0,
+          flagged: 0,
+          questionableRows: []
+        }
+      });
+    }
 
-    for (const [index, row] of rows.entries()) {
-      const staffIdRaw = row["Staff ID"];
-      const wsllScoreRaw = row["WSLL Score"];
-      const wsllDateRaw = row["WSLL Date"];
+    const headers = Object.keys(rows[0]);
+    const headerMap = buildHeaderMap(headers);
 
-      const flags: string[] = [];
+    const blockingFlags = new Set<WsllFlagCode>([
+      "MISSING_STAFF_ID",
+      "INVALID_WSLL_SCORE",
+      "WSLL_SCORE_OUT_OF_RANGE",
+      "INVALID_WSLL_DATE_FORMAT"
+    ]);
 
-      // Parse and validate staffId
-      const staffId = normalizeStaffId(staffIdRaw);
-      if (!staffId) {
-        flags.push("MISSING_STAFF_ID");
+    const questionableRows: Array<{
+      row_number: number;
+      raw_values: Record<string, string>;
+      flags: WsllFlagCode[];
+    }> = [];
+
+    let imported = 0;
+
+    for (let index = 0; index < rows.length; index += 1) {
+      const rowNumber = index + 2;
+      const normalized = normalizeWsllRow(rows[index], rowNumber, headerMap);
+      const flags: WsllFlagCode[] = [...normalized.flags];
+
+      const hasBlockingFlag = flags.some((flag) => blockingFlags.has(flag));
+
+      if (!hasBlockingFlag) {
+        const hubspotContact = await getIdentityContactByStaffId(normalized.staff_id);
+        if (!hubspotContact) {
+          flags.push("MISSING_IN_HUBSPOT");
+        }
       }
 
-      // Parse and validate wsllScore
-      const { score: wsllScore, isValid: scoreValid, flagText: scoreFlagText } = parseWsllScore(wsllScoreRaw);
-      if (scoreFlagText) {
-        flags.push(scoreFlagText);
-      }
-
-      // Parse and validate wsllDate
-      const { date: wsllDate, isValid: dateValid, flagText: dateFlagText } = parseWsllDate(wsllDateRaw);
-      if (dateFlagText && wsllDateRaw && wsllDateRaw.trim()) {
-        // Only flag if a date was provided but invalid
-        flags.push(dateFlagText);
-      }
-
-      // Blocking errors: MISSING_STAFF_ID and invalid (not just missing) wsll score
-      if (!staffId || !scoreValid) {
-        questionableRows.push({ row: index + 2, ...row, flags: flags.join(", ") });
+      if (flags.length > 0) {
+        questionableRows.push({
+          row_number: rowNumber,
+          raw_values: normalized.raw,
+          flags
+        });
         continue;
       }
 
-      // Non-blocking: invalid date format (still allow upload with null date)
-      if (dateFlagText && wsllDateRaw && wsllDateRaw.trim()) {
-        questionableRows.push({ row: index + 2, ...row, flags: flags.join(", ") });
-        continue;
-      }
-
-      // Upsert WSLL score
-      await prisma.wsllScore.upsert({
-        where: {
-          cycleId_staffId: {
-            cycleId: activeCycle.id,
-            staffId,
-          },
-        },
-        create: {
-          cycleId: activeCycle.id,
-          staffId,
-          wsllScore: wsllScore!,
-          wsllDate,
-        },
-        update: {
-          wsllScore: wsllScore!,
-          wsllDate,
-        },
+      await prisma.wsllRecord.create({
+        data: {
+          staffId: normalized.staff_id,
+          wsllScore: normalized.wsll_score as number,
+          wsllDate: normalized.wsll_date ? new Date(`${normalized.wsll_date}T00:00:00.000Z`) : null,
+          source: WsllRecordSource.CSV,
+          uploadedBy,
+          rawRowJson: normalized.raw,
+          flags: null
+        }
       });
 
-      importedCount++;
+      imported += 1;
     }
 
     return res.status(200).json({
       success: true,
       data: {
-        total: rows.length,
-        imported: importedCount,
+        total_rows: rows.length,
+        imported,
         flagged: questionableRows.length,
-        questionableRows,
-      },
+        questionableRows
+      }
+    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : "Failed to upload WSLL records";
+    if (errorMessage.includes("Missing HUBSPOT_API_TOKEN")) {
+      return res.status(500).json({
+        success: false,
+        error: { message: "Missing HUBSPOT_API_TOKEN. Please set HUBSPOT_API_TOKEN in the API environment." }
+      });
+    }
+
+    return res.status(500).json({
+      success: false,
+      error: { message: errorMessage }
+    });
+  }
+});
+
+app.post("/wsll", express.json(), async (req, res) => {
+  try {
+    const normalizedStaffId = normalizeCsvStaffId(String(req.body?.staff_id ?? ""));
+    const rawScore = req.body?.wsll_score;
+    const score = Number.parseFloat(String(rawScore ?? ""));
+    const rawDate = String(req.body?.wsll_date ?? "");
+
+    if (!normalizedStaffId) {
+      return res.status(400).json({ error: "MISSING_STAFF_ID" });
+    }
+
+    if (!Number.isFinite(score)) {
+      return res.status(400).json({ error: "INVALID_WSLL_SCORE" });
+    }
+
+    if (score < 0 || score > 5) {
+      return res.status(400).json({ error: "WSLL_SCORE_OUT_OF_RANGE" });
+    }
+
+    const dateIso = parseFlexibleDateToIso(rawDate);
+    if (rawDate.trim() && !dateIso) {
+      return res.status(400).json({ error: "INVALID_WSLL_DATE_FORMAT" });
+    }
+
+    const hubspotContact = await getIdentityContactByStaffId(normalizedStaffId);
+    if (!hubspotContact) {
+      return res.status(404).json({ error: "MISSING_IN_HUBSPOT" });
+    }
+
+    const requestedSource = String(req.body?.source ?? "API").toUpperCase();
+    const source = requestedSource === "CSV"
+      ? WsllRecordSource.CSV
+      : requestedSource === "UI"
+        ? WsllRecordSource.UI
+        : WsllRecordSource.API;
+
+    const created = await prisma.wsllRecord.create({
+      data: {
+        staffId: normalizedStaffId,
+        wsllScore: score,
+        wsllDate: dateIso ? new Date(`${dateIso}T00:00:00.000Z`) : null,
+        source,
+        uploadedBy: typeof req.body?.uploaded_by === "string" ? req.body.uploaded_by : null,
+        rawRowJson: req.body?.raw_row_json ?? null,
+        flags: null
+      }
+    });
+
+    return res.status(201).json({
+      staff_id: created.staffId,
+      wsll_score: created.wsllScore,
+      wsll_date: created.wsllDate ? created.wsllDate.toISOString().slice(0, 10) : null,
+      source: created.source,
+      uploaded_by: created.uploadedBy,
+      uploaded_at: created.uploadedAt
+    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : "Failed to create WSLL record";
+    if (errorMessage.includes("Missing HUBSPOT_API_TOKEN")) {
+      return res.status(500).json({
+        error: "Missing HUBSPOT_API_TOKEN. Please set HUBSPOT_API_TOKEN in the API environment."
+      });
+    }
+
+    return res.status(500).json({ error: errorMessage });
+  }
+});
+
+app.get("/wsll/latest/:staffId", async (req, res) => {
+  try {
+    const staffId = normalizeCsvStaffId(req.params.staffId ?? "");
+    if (!staffId) {
+      return res.status(400).json({ error: "staffId is required" });
+    }
+
+    const latest = await prisma.wsllRecord.findFirst({
+      where: { staffId },
+      orderBy: [{ wsllDate: "desc" }, { uploadedAt: "desc" }]
+    });
+
+    if (!latest) {
+      return res.status(404).json({ error: "No WSLL records found" });
+    }
+
+    return res.status(200).json({
+      staff_id: latest.staffId,
+      wsll_score: latest.wsllScore,
+      wsll_date: latest.wsllDate ? latest.wsllDate.toISOString().slice(0, 10) : null,
+      uploaded_at: latest.uploadedAt
+    });
+  } catch (error) {
+    return res.status(500).json({
+      error: error instanceof Error ? error.message : "Failed to fetch latest WSLL"
+    });
+  }
+});
+
+app.get("/wsll/history/:staffId", async (req, res) => {
+  try {
+    const staffId = normalizeCsvStaffId(req.params.staffId ?? "");
+    if (!staffId) {
+      return res.status(400).json({ error: "staffId is required" });
+    }
+
+    const history = await prisma.wsllRecord.findMany({
+      where: { staffId },
+      orderBy: [{ wsllDate: "desc" }, { uploadedAt: "desc" }]
+    });
+
+    return res.status(200).json({
+      staff_id: staffId,
+      records: history.map((record) => ({
+        id: record.id,
+        wsll_score: record.wsllScore,
+        wsll_date: record.wsllDate ? record.wsllDate.toISOString().slice(0, 10) : null,
+        source: record.source,
+        uploaded_by: record.uploadedBy,
+        uploaded_at: record.uploadedAt,
+        flags: record.flags
+      }))
+    });
+  } catch (error) {
+    return res.status(500).json({
+      error: error instanceof Error ? error.message : "Failed to fetch WSLL history"
+    });
+  }
+});
+
+// ============================================================================
+// OPTION 1 MARKET VALUE ENDPOINTS (DB + normalized CSV)
+// ============================================================================
+
+app.post("/market-value/upload", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        error: { message: "No file uploaded" }
+      });
+    }
+
+    const rows = parse(req.file.buffer.toString("utf-8"), {
+      columns: true,
+      skip_empty_lines: true,
+      trim: true,
+      bom: true
+    }) as Array<Record<string, string>>;
+
+    if (rows.length === 0) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          total_rows: 0,
+          imported: 0,
+          flagged: 0,
+          questionableRows: []
+        }
+      });
+    }
+
+    const headerMap = buildMarketHeaderMap(Object.keys(rows[0]));
+    const questionableRows: Array<{
+      row_number: number;
+      raw_values: Record<string, string>;
+      flags: string[];
+    }> = [];
+
+    let imported = 0;
+
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index];
+      const rowNumber = index + 2;
+      const flags: string[] = [];
+
+      const staffRole = (headerMap.staff_role ? row[headerMap.staff_role] : "")?.trim() ?? "";
+      const location = (headerMap.location ? row[headerMap.location] : "")?.trim() || null;
+      const band = (headerMap.band ? row[headerMap.band] : "")?.trim() || null;
+      const minValueRaw = (headerMap.min_value ? row[headerMap.min_value] : "")?.trim() ?? "";
+      const maxValueRaw = (headerMap.max_value ? row[headerMap.max_value] : "")?.trim() ?? "";
+      const currency = ((headerMap.currency ? row[headerMap.currency] : "")?.trim() || "AUD").toUpperCase();
+      const effectiveDateRaw = (headerMap.effective_date ? row[headerMap.effective_date] : "")?.trim() ?? "";
+
+      if (!staffRole) {
+        flags.push("MISSING_STAFF_ROLE");
+      }
+
+      const minValue = Number.parseFloat(minValueRaw);
+      if (!Number.isFinite(minValue)) {
+        flags.push("INVALID_MIN_VALUE");
+      }
+
+      const maxValue = Number.parseFloat(maxValueRaw);
+      if (!Number.isFinite(maxValue)) {
+        flags.push("INVALID_MAX_VALUE");
+      }
+
+      if (Number.isFinite(minValue) && Number.isFinite(maxValue) && minValue > maxValue) {
+        flags.push("MIN_GREATER_THAN_MAX");
+      }
+
+      const effectiveDate = parseFlexibleDateToIso(effectiveDateRaw);
+      if (!effectiveDate) {
+        flags.push("INVALID_EFFECTIVE_DATE");
+      }
+
+      if (flags.length > 0) {
+        questionableRows.push({
+          row_number: rowNumber,
+          raw_values: row,
+          flags
+        });
+        continue;
+      }
+
+      await prisma.marketValueGuide.create({
+        data: {
+          staffRole,
+          location,
+          band,
+          minValue,
+          maxValue,
+          currency,
+          effectiveDate: new Date(`${effectiveDate}T00:00:00.000Z`),
+          source: MarketValueSource.CSV,
+          rawRowJson: row
+        }
+      });
+
+      imported += 1;
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        total_rows: rows.length,
+        imported,
+        flagged: questionableRows.length,
+        questionableRows
+      }
     });
   } catch (error) {
     return res.status(500).json({
       success: false,
-      error: { message: error instanceof Error ? error.message : "Failed to upload WSLL scores" },
+      error: { message: error instanceof Error ? error.message : "Failed to upload market value guides" }
+    });
+  }
+});
+
+app.get("/market-value", async (req, res) => {
+  try {
+    const role = typeof req.query.role === "string" ? req.query.role.trim() : "";
+    const location = typeof req.query.location === "string" ? req.query.location.trim() : "";
+    const effectiveDateRaw = typeof req.query.effective_date === "string" ? req.query.effective_date.trim() : "";
+
+    const where: {
+      staffRole?: string;
+      location?: string;
+      effectiveDate?: Date;
+    } = {};
+
+    if (role) {
+      where.staffRole = role;
+    }
+
+    if (location) {
+      where.location = location;
+    }
+
+    if (effectiveDateRaw) {
+      const effectiveDate = parseFlexibleDateToIso(effectiveDateRaw);
+      if (!effectiveDate) {
+        return res.status(400).json({ error: "INVALID_EFFECTIVE_DATE" });
+      }
+      where.effectiveDate = new Date(`${effectiveDate}T00:00:00.000Z`);
+    }
+
+    const guides = await prisma.marketValueGuide.findMany({
+      where,
+      orderBy: [{ effectiveDate: "desc" }, { uploadedAt: "desc" }]
+    });
+
+    return res.status(200).json({
+      count: guides.length,
+      items: guides.map((guide) => ({
+        id: guide.id,
+        staff_role: guide.staffRole,
+        location: guide.location,
+        band: guide.band,
+        min_value: guide.minValue,
+        max_value: guide.maxValue,
+        currency: guide.currency,
+        effective_date: guide.effectiveDate.toISOString().slice(0, 10),
+        source: guide.source,
+        uploaded_at: guide.uploadedAt
+      }))
+    });
+  } catch (error) {
+    return res.status(500).json({
+      error: error instanceof Error ? error.message : "Failed to fetch market value guides"
     });
   }
 });
@@ -2008,7 +2311,7 @@ app.get("/exports/payroll", async (req, res) => {
 
     const csvLines = [headers.join(",")];
     for (const row of rows) {
-      const line = headers.map((h) => row[h] || "").join(",");
+      const line = headers.map((h) => (row as Record<string, string>)[h] || "").join(",");
       csvLines.push(line);
     }
 
@@ -2049,6 +2352,104 @@ app.patch("/cases/:id/wsll-exception", express.json(), async (req, res) => {
     return res.status(500).json({
       success: false,
       error: { message: error instanceof Error ? error.message : "Failed to update WSLL exception" },
+    });
+  }
+});
+
+// HubSpot property discovery for contacts
+app.get("/hubspot/properties/contacts", async (req, res) => {
+  try {
+    const search = typeof req.query.search === "string" ? req.query.search : undefined;
+    const group = typeof req.query.group === "string" ? req.query.group : undefined;
+    const includeHidden = typeof req.query.includeHidden === "string"
+      ? req.query.includeHidden.toLowerCase() === "true"
+      : false;
+    const limit = typeof req.query.limit === "string" ? Number.parseInt(req.query.limit, 10) : undefined;
+
+    const data = await getContactProperties({
+      search,
+      group,
+      includeHidden,
+      limit
+    });
+
+    return res.status(200).json(data);
+  } catch (error) {
+    console.error("HubSpot property discovery failed:", error);
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    if (errorMessage.includes("Missing HUBSPOT_API_TOKEN")) {
+      return res.status(500).json({
+        error: "Missing HUBSPOT_API_TOKEN. Please set HUBSPOT_API_TOKEN in the API environment."
+      });
+    }
+    // Ensure we don't leak the token in error messages
+    const sanitizedMessage = errorMessage.replace(/Bearer [^\s]+/g, "Bearer [REDACTED]");
+    return res.status(500).json({ 
+      error: "HubSpot property discovery failed", 
+      details: sanitizedMessage 
+    });
+  }
+});
+
+app.get("/hubspot/properties/contacts/:name", async (req, res) => {
+  try {
+    const { name } = req.params;
+
+    if (!name) {
+      return res.status(400).json({ error: "Property name is required" });
+    }
+
+    const property = await getContactPropertyByName(name);
+    return res.status(200).json(property);
+  } catch (error) {
+    console.error("HubSpot property detail lookup failed:", error);
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    if (errorMessage.includes("Missing HUBSPOT_API_TOKEN")) {
+      return res.status(500).json({
+        error: "Missing HUBSPOT_API_TOKEN. Please set HUBSPOT_API_TOKEN in the API environment."
+      });
+    }
+    if (errorMessage.includes("HubSpot API error: 404")) {
+      return res.status(404).json({ error: `Property '${req.params.name}' not found` });
+    }
+    const sanitizedMessage = errorMessage.replace(/Bearer [^\s]+/g, "Bearer [REDACTED]");
+    return res.status(500).json({
+      error: "HubSpot property detail lookup failed",
+      details: sanitizedMessage
+    });
+  }
+});
+
+// HubSpot contact lookup by staff ID
+app.get("/hubspot/contact/:staffId", async (req, res) => {
+  try {
+    const { staffId } = req.params;
+
+    const contact = await getContactByStaffId(staffId);
+
+    if (!contact) {
+      return res.status(404).json({ error: "Contact not found" });
+    }
+
+    const properties = contact.properties;
+
+    return res.status(200).json({
+      staff_id: properties[HUBSPOT_CONTACT_PROPS.staffId] || "",
+      email: properties[HUBSPOT_CONTACT_PROPS.email] || "",
+      contact_type: properties[HUBSPOT_CONTACT_PROPS.contactType] || "",
+      staff_role: properties[HUBSPOT_CONTACT_PROPS.staffRole] || "",
+      staff_start_date: properties[HUBSPOT_CONTACT_PROPS.staffStartDate] || "",
+      relationship_manager: properties[HUBSPOT_CONTACT_PROPS.relationshipManager] || "",
+      success_manager: properties[HUBSPOT_CONTACT_PROPS.successManager] || ""
+    });
+  } catch (error) {
+    console.error("HubSpot lookup failed:", error);
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    // Ensure we don't leak the token in error messages
+    const sanitizedMessage = errorMessage.replace(/Bearer [^\s]+/g, "Bearer [REDACTED]");
+    return res.status(500).json({ 
+      error: "HubSpot lookup failed", 
+      details: sanitizedMessage 
     });
   }
 });
