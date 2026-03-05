@@ -239,7 +239,338 @@ Get current user profile.
 
 ---
 
-## 2. Cycle Endpoints
+## 2. Scope Endpoints
+
+Get staff visibility scope for authenticated user or specific manager. Scope endpoints return only appraisal-eligible VAs by default, with options to include non-eligible staff for debugging.
+
+**Definition: Appraisal-Eligible Staff**
+A staff member is appraisal-eligible if they meet ALL of:
+1. Contact type is one of: "Staff Member - Active", "Ops Staff - Active", "Onshore Staff - Active"
+2. Staff ID is present (non-empty)
+3. Email is present (non-empty)
+4. Staff role does NOT contain: "Manager", "Director", "Head", "Lead", "Controller", "Officer"
+5. Staff role is NOT exactly: "Success Manager" or "Relationship Manager"
+6. (For `/scope/me`) Not the viewer's own record
+
+**Query Parameters** (same for all scope endpoints):
+- `include_non_eligible=true`: Return all staff including managers, separated staff, etc. (default: false)
+- `include_separated=true`: Include separated contact types (only with include_non_eligible=true; default: false)
+
+**Response Fields**:
+- `count`: Number of filtered staff (the actual count returned)
+- `raw_count`: (SM endpoint) Original staff count before filtering
+- `raw_total_staff`: (RM endpoint) Original total staff count before filtering
+- `total_staff`: (RM endpoint) Filtered total staff count
+
+---
+
+### GET /scope/me
+
+Get scoped staff list for authenticated viewer. Returns only appraisal-eligible VAs (excluding the viewer themselves).
+
+**Headers**: `Authorization: Bearer <token>`
+
+**Query Parameters**:
+- `include_non_eligible=true`: Return all staff including non-eligible
+- `include_separated=true`: Include separated staff (with include_non_eligible=true)
+
+**Success Response - SM User** (200):
+```json
+{
+  "viewer_type": "SM",
+  "sm_owner_id": "12345",
+  "count": 25,
+  "raw_count": 32,
+  "staff": [
+    {
+      "hubspot_id": "uuid1",
+      "staff_id": "98765",
+      "full_name": "Jane Doe",
+      "email": "jane@vaplatinum.com.au",
+      "staff_role": "Payroll Officer",
+      "contact_type": "Staff Member - Active",
+      "sm_owner_id": "12345",
+      "rm": "John Smith"
+    },
+    {
+      "hubspot_id": "uuid2",
+      "staff_id": "87654",
+      "full_name": "Bob Wilson",
+      "email": "bob@vaplatinum.com.au",
+      "staff_role": "Operations Specialist",
+      "contact_type": "Ops Staff - Active",
+      "sm_owner_id": "12345",
+      "rm": "John Smith"
+    }
+  ]
+}
+```
+
+**Example with include_non_eligible=true**:
+```json
+{
+  "viewer_type": "SM",
+  "sm_owner_id": "12345",
+  "count": 32,
+  "raw_count": 32,
+  "staff": [
+    {
+      "hubspot_id": "uuid1",
+      "staff_id": "98765",
+      "full_name": "Jane Doe",
+      "email": "jane@vaplatinum.com.au",
+      "staff_role": "Payroll Officer",
+      "contact_type": "Staff Member - Active",
+      "sm_owner_id": "12345",
+      "rm": "John Smith"
+    },
+    {
+      "hubspot_id": "uuid3",
+      "staff_id": "55555",
+      "full_name": "Vanessa Manager",
+      "email": "van@vaplatinum.com.au",
+      "staff_role": "Operations Manager",
+      "contact_type": "Staff Member - Active",
+      "sm_owner_id": "12345",
+      "rm": "John Smith"
+    },
+    {
+      "hubspot_id": "uuid4",
+      "staff_id": "44444",
+      "full_name": "John Smith",
+      "email": "john@vaplatinum.com.au",
+      "staff_role": "Relationship Manager",
+      "contact_type": "Staff Member - Separated",
+      "sm_owner_id": "12345",
+      "rm": "John Smith"
+    }
+  ]
+}
+```
+
+**Success Response - RM User** (200):
+```json
+{
+  "viewer_type": "RM",
+  "rm": "John Smith",
+  "total_staff": 145,
+  "raw_total_staff": 178,
+  "sm_groups": [
+    {
+      "sm_owner_id": "12345",
+      "count": 25,
+      "staff": [
+        {
+          "hubspot_id": "uuid1",
+          "staff_id": "98765",
+          "full_name": "Jane Doe",
+          "email": "jane@vaplatinum.com.au",
+          "staff_role": "Payroll Officer",
+          "contact_type": "Staff Member - Active",
+          "sm_owner_id": "12345",
+          "rm": "John Smith"
+        }
+      ]
+    },
+    {
+      "sm_owner_id": "67890",
+      "count": 120,
+      "staff": [ ... ]
+    }
+  ]
+}
+```
+
+**Error Responses**:
+- 401: Not authenticated
+- 403: Viewer type UNSCOPED has no scope access
+
+---
+
+### GET /scope/sm/:smOwnerId
+
+Get staff list for a specific Success Manager. Returns only appraisal-eligible VAs by default.
+
+**Query Parameters**:
+- `include_non_eligible=true`: Return all staff including non-eligible
+- `include_separated=true`: Include separated staff (with include_non_eligible=true)
+
+**Success Response** (200):
+```json
+{
+  "viewer_type": "SM",
+  "sm_owner_id": "12345",
+  "count": 25,
+  "raw_count": 32,
+  "staff": [
+    {
+      "hubspot_id": "uuid1",
+      "staff_id": "98765",
+      "full_name": "Jane Doe",
+      "email": "jane@vaplatinum.com.au",
+      "staff_role": "Payroll Officer",
+      "contact_type": "Staff Member - Active",
+      "sm_owner_id": "12345",
+      "rm": "John Smith"
+    },
+    {
+      "hubspot_id": "uuid2",
+      "staff_id": "87654",
+      "full_name": "Bob Wilson",
+      "email": "bob@vaplatinum.com.au",
+      "staff_role": "Operations Specialist",
+      "contact_type": "Ops Staff - Active",
+      "sm_owner_id": "12345",
+      "rm": "John Smith"
+    }
+  ]
+}
+```
+
+**Example with include_non_eligible=true**:
+```
+GET /scope/sm/12345?include_non_eligible=true
+
+Response:
+{
+  "viewer_type": "SM",
+  "sm_owner_id": "12345",
+  "count": 32,
+  "raw_count": 32,
+  "staff": [
+    {
+      "hubspot_id": "uuid1",
+      "staff_id": "98765",
+      "full_name": "Jane Doe",
+      "email": "jane@vaplatinum.com.au",
+      "staff_role": "Payroll Officer",
+      "contact_type": "Staff Member - Active",
+      "sm_owner_id": "12345",
+      "rm": "John Smith"
+    },
+    {
+      "hubspot_id": "uuid3",
+      "staff_id": "55555",
+      "full_name": "Vanessa Manager",
+      "email": "van@vaplatinum.com.au",
+      "staff_role": "Operations Manager",
+      "contact_type": "Staff Member - Active",
+      "sm_owner_id": "12345",
+      "rm": "John Smith"
+    }
+  ]
+}
+```
+
+**Error Responses**:
+- 400: smOwnerId is required
+- 500: Missing or invalid HUBSPOT_API_TOKEN
+
+---
+
+### GET /scope/rm/:rmName
+
+Get staff list for a specific Relationship Manager, grouped by Success Manager. Returns only appraisal-eligible VAs by default.
+
+**URL Parameter**:
+- `:rmName`: URL-encoded RM name (e.g., "John%20Smith")
+
+**Query Parameters**:
+- `include_non_eligible=true`: Return all staff including non-eligible
+- `include_separated=true`: Include separated staff (with include_non_eligible=true)
+
+**Success Response** (200):
+```json
+{
+  "viewer_type": "RM",
+  "rm": "John Smith",
+  "total_staff": 145,
+  "raw_total_staff": 178,
+  "sm_groups": [
+    {
+      "sm_owner_id": "12345",
+      "count": 25,
+      "staff": [
+        {
+          "hubspot_id": "uuid1",
+          "staff_id": "98765",
+          "full_name": "Jane Doe",
+          "email": "jane@vaplatinum.com.au",
+          "staff_role": "Payroll Officer",
+          "contact_type": "Staff Member - Active",
+          "sm_owner_id": "12345",
+          "rm": "John Smith"
+        }
+      ]
+    },
+    {
+      "sm_owner_id": "67890",
+      "count": 120,
+      "staff": [
+        {
+          "hubspot_id": "uuid5",
+          "staff_id": "11111",
+          "full_name": "Alice Johnson",
+          "email": "alice@vaplatinum.com.au",
+          "staff_role": "Senior Analyst",
+          "contact_type": "Ops Staff - Active",
+          "sm_owner_id": "67890",
+          "rm": "John Smith"
+        }
+      ]
+    }
+  ]
+}
+```
+
+**Example with include_non_eligible=true**:
+```
+GET /scope/rm/John%20Smith?include_non_eligible=true
+
+Response:
+{
+  "viewer_type": "RM",
+  "rm": "John Smith",
+  "total_staff": 178,
+  "raw_total_staff": 178,
+  "sm_groups": [
+    {
+      "sm_owner_id": "12345",
+      "count": 32,
+      "staff": [
+        {
+          "hubspot_id": "uuid1",
+          "staff_id": "98765",
+          "full_name": "Jane Doe",
+          "email": "jane@vaplatinum.com.au",
+          "staff_role": "Payroll Officer",
+          "contact_type": "Staff Member - Active",
+          "sm_owner_id": "12345",
+          "rm": "John Smith"
+        },
+        {
+          "hubspot_id": "uuid3",
+          "staff_id": "55555",
+          "full_name": "Vanessa Manager",
+          "email": "van@vaplatinum.com.au",
+          "staff_role": "Operations Manager",
+          "contact_type": "Staff Member - Active",
+          "sm_owner_id": "12345",
+          "rm": "John Smith"
+        }
+      ]
+    }
+  ]
+}
+```
+
+**Error Responses**:
+- 400: rmName is required
+- 500: Missing or invalid HUBSPOT_API_TOKEN
+
+---
+
+## 3. Cycle Endpoints
 
 ### GET /cycles
 
@@ -463,7 +794,7 @@ Delete cycle (soft delete). Only allowed if no cases exist. Requires ADMIN role.
 
 ---
 
-## 3. Case Endpoints
+## 4. Case Endpoints
 
 ### GET /cases
 
@@ -751,7 +1082,7 @@ Compute or recompute market recommendation for case.
 
 ---
 
-## 4. Compensation Endpoints
+## 5. Compensation Endpoints
 
 ### PATCH /cases/:id/compensation
 
@@ -860,7 +1191,7 @@ Enable override and set override reason.
 
 ---
 
-## 5. Approval Endpoints
+## 6. Approval Endpoints
 
 ### POST /cases/:id/approvals
 
@@ -1011,7 +1342,7 @@ Delete approval attachment. Only allowed if cycle not sealed.
 
 ---
 
-## 6. Checklist Endpoints
+## 7. Checklist Endpoints
 
 ### GET /cases/:id/checklist
 
@@ -1086,7 +1417,7 @@ Mark checklist item as complete. Only user with assigned role can complete.
 
 ---
 
-## 7. Upload Endpoints
+## 8. Upload Endpoints
 
 ### POST /uploads/intake
 
@@ -1249,7 +1580,7 @@ List upload batches with filtering.
 
 ---
 
-## 8. Market Rules Endpoints
+## 9. Market Rules Endpoints
 
 ### GET /market-rules/tenure-bands
 
@@ -1544,7 +1875,7 @@ Update global settings. Requires ADMIN role.
 
 ---
 
-## 9. Override Endpoints
+## 10. Override Endpoints
 
 ### GET /overrides/manager
 
@@ -1673,7 +2004,7 @@ Resolve manager for specific employee and cycle using override precedence.
 
 ---
 
-## 10. Export Endpoints
+## 11. Export Endpoints
 
 ### GET /exports/payroll
 
@@ -1752,7 +2083,7 @@ Export overrides report showing all override cases.
 
 ---
 
-## 11. Dashboard Endpoints
+## 12. Dashboard Endpoints
 
 ### GET /dashboard/cycle-stats
 
@@ -1890,7 +2221,7 @@ Get analysis of override cases and cost impact.
 
 ---
 
-## 12. Admin Endpoints
+## 13. Admin Endpoints
 
 ### GET /admin/field-groups
 

@@ -19,7 +19,9 @@ const IDENTITY_PROPERTY_LIST = [
   HUBSPOT_IDENTITY_PROPS.staff_role,
   HUBSPOT_IDENTITY_PROPS.staff_start_date,
   HUBSPOT_IDENTITY_PROPS.relationship_manager,
-  HUBSPOT_IDENTITY_PROPS.success_manager
+  HUBSPOT_IDENTITY_PROPS.success_manager,
+  "firstname",
+  "lastname"
 ];
 
 const searchContact = async (propertyName: string, value: string): Promise<HubSpotContact | null> => {

@@ -4,6 +4,8 @@ import express, { type Request, type Response } from "express";
 import multer from "multer";
 import { parse } from "csv-parse/sync";
 import { PrismaClient } from "@prisma/client";
+import scopeRoutes from "./scopeRoutes";
+import { loginHandler, requireAuth, meHandler } from "./auth";
 const prisma = new PrismaClient();
 import { CycleStatus, CycleType, MovementType, ProcessingStatus, RowStatus, UploadType, EvidenceType, PayrollStatus, WsllRecordSource, MarketValueSource } from "@prisma/client";
 import {
@@ -550,10 +552,15 @@ const processIntakeUpload = async (
 
 app.use(cors());
 app.use(express.json());
+app.use("/scope", scopeRoutes);
 
 app.get("/health", (_req, res) => {
   res.status(200).json({ ok: true });
 });
+
+// Authentication endpoints
+app.post("/auth/login", loginHandler);
+app.get("/me", requireAuth, meHandler);
 
 app.post("/cycles/ensure-active", async (_req, res) => {
   try {
