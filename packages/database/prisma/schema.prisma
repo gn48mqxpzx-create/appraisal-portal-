@@ -1082,3 +1082,35 @@ enum PayrollStatus {
   PENDING
   PROCESSED
 }
+
+// ============================================================================
+// EMPLOYEE DIRECTORY (Synced from HubSpot)
+// ============================================================================
+
+model EmployeeDirectory {
+  id                   String   @id @default(uuid())
+  hubspotContactId     String   @unique  // HubSpot contact ID
+  staffId              String   @unique  // Unique staff ID number
+  employeeType         String   @default("VA") // VA or SM classification
+  fullName             String
+  email                String
+  contactType          String   // "Staff Member - Active", etc. (filtered on sync)
+  staffRole            String
+  smName               String?  // Success Manager name (sm field from HubSpot)
+  smOwnerId            String?  // SM's own HubSpot owner ID (for SM records, used to link VAs)
+  rmName               String?  // Relationship Manager name (senior_success_manager from HubSpot)
+  staffStartDate       DateTime?
+  
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+  
+  @@index([staffId])
+  @@index([employeeType])
+  @@index([email])
+  @@index([contactType])
+  @@index([staffRole])
+  @@index([smName])
+  @@index([smOwnerId])
+  @@index([rmName])
+  @@map("employee_directory")
+}

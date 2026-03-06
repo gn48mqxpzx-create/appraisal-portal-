@@ -433,6 +433,11 @@ export function CaseDetailPage() {
         });
       }
 
+      if (!res) {
+        alert("Please provide either a file or a HubSpot link");
+        return;
+      }
+
       const json = await res.json();
       if (json.success) {
         alert("Evidence uploaded");
@@ -775,8 +780,9 @@ export function CaseDetailPage() {
             <h3 className="text-lg font-semibold text-gray-900 mb-4">Current Compensation</h3>
             <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Base Salary</label>
+                <label htmlFor="baseSalary" className="block text-sm font-medium text-gray-700 mb-1">Base Salary</label>
                 <input
+                  id="baseSalary"
                   type="number"
                   step="0.01"
                   value={baseSalary}
@@ -785,8 +791,9 @@ export function CaseDetailPage() {
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Fixed Allowances</label>
+                <label htmlFor="fixedAllowances" className="block text-sm font-medium text-gray-700 mb-1">Fixed Allowances</label>
                 <input
+                  id="fixedAllowances"
                   type="number"
                   step="0.01"
                   value={fixedAllowances}
@@ -795,8 +802,9 @@ export function CaseDetailPage() {
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Variable Allowances</label>
+                <label htmlFor="variableAllowances" className="block text-sm font-medium text-gray-700 mb-1">Variable Allowances</label>
                 <input
+                  id="variableAllowances"
                   type="number"
                   step="0.01"
                   value={variableAllowances}
@@ -805,8 +813,9 @@ export function CaseDetailPage() {
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Recurring Bonuses</label>
+                <label htmlFor="recurringBonuses" className="block text-sm font-medium text-gray-700 mb-1">Recurring Bonuses</label>
                 <input
+                  id="recurringBonuses"
                   type="number"
                   step="0.01"
                   value={recurringBonuses}
@@ -815,8 +824,9 @@ export function CaseDetailPage() {
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">One-time Bonuses</label>
+                <label htmlFor="onetimeBonuses" className="block text-sm font-medium text-gray-700 mb-1">One-time Bonuses</label>
                 <input
+                  id="onetimeBonuses"
                   type="number"
                   step="0.01"
                   value={onetimeBonuses}
@@ -929,8 +939,9 @@ export function CaseDetailPage() {
             <div className="space-y-4">
               <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Override Amount ($)</label>
+                  <label htmlFor="overrideAmount" className="block text-sm font-medium text-gray-700 mb-1">Override Amount ($)</label>
                   <input
+                    id="overrideAmount"
                     type="number"
                     step="0.01"
                     value={overrideAmount}
@@ -939,8 +950,9 @@ export function CaseDetailPage() {
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Override Percent (%)</label>
+                  <label htmlFor="overridePercent" className="block text-sm font-medium text-gray-700 mb-1">Override Percent (%)</label>
                   <input
+                    id="overridePercent"
                     type="number"
                     step="0.01"
                     value={overridePercent}
@@ -949,8 +961,9 @@ export function CaseDetailPage() {
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Override New Base ($)</label>
+                  <label htmlFor="overrideNewBase" className="block text-sm font-medium text-gray-700 mb-1">Override New Base ($)</label>
                   <input
+                    id="overrideNewBase"
                     type="number"
                     step="0.01"
                     value={overrideNewBase}
@@ -1040,8 +1053,9 @@ export function CaseDetailPage() {
 
                   <form onSubmit={handleUploadEvidence} className="space-y-3">
                     <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Upload PDF Evidence</label>
+                      <label htmlFor="evidenceFile" className="block text-sm font-medium text-gray-700 mb-1">Upload PDF Evidence</label>
                       <input
+                        id="evidenceFile"
                         type="file"
                         accept=".pdf"
                         onChange={(e) => setEvidenceFile(e.target.files?.[0] || null)}
@@ -1050,8 +1064,9 @@ export function CaseDetailPage() {
                     </div>
                     <div className="text-center text-sm text-gray-500">OR</div>
                     <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">HubSpot Link</label>
+                      <label htmlFor="hubspotLink" className="block text-sm font-medium text-gray-700 mb-1">HubSpot Link</label>
                       <input
+                        id="hubspotLink"
                         type="url"
                         value={hubspotLink}
                         onChange={(e) => setHubspotLink(e.target.value)}
@@ -1101,8 +1116,9 @@ export function CaseDetailPage() {
               {data?.status === "PAYROLL_PENDING" && (
                 <div className="space-y-3">
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Effectivity Date (required)</label>
+                    <label htmlFor="effectivityDate" className="block text-sm font-medium text-gray-700 mb-1">Effectivity Date (required)</label>
                     <input
+                      id="effectivityDate"
                       type="date"
                       value={effectivityDate}
                       onChange={(e) => setEffectivityDate(e.target.value)}

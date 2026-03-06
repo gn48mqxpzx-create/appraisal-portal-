@@ -5,6 +5,7 @@ import multer from "multer";
 import { parse } from "csv-parse/sync";
 import { PrismaClient } from "@prisma/client";
 import scopeRoutes from "./scopeRoutes";
+import directoryRoutes from "./directoryRoutes";
 import { loginHandler, requireAuth, meHandler } from "./auth";
 const prisma = new PrismaClient();
 import { CycleStatus, CycleType, MovementType, ProcessingStatus, RowStatus, UploadType, EvidenceType, PayrollStatus, WsllRecordSource, MarketValueSource } from "@prisma/client";
@@ -553,6 +554,7 @@ const processIntakeUpload = async (
 app.use(cors());
 app.use(express.json());
 app.use("/scope", scopeRoutes);
+app.use("/directory", directoryRoutes);
 
 app.get("/health", (_req, res) => {
   res.status(200).json({ ok: true });

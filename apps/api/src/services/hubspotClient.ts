@@ -18,6 +18,78 @@ export function getHubSpotToken(): string {
   return token;
 }
 
+export interface HubSpotOwner {
+  id: string;
+  email: string;
+  firstName: string;
+  lastName: string;
+  userId: number;
+  createdAt: string;
+  updatedAt: string;
+  archived: boolean;
+}
+
+interface HubSpotOwnersResponse {
+  results: HubSpotOwner[];
+  paging?: {
+    next?: {
+      after: string;
+    };
+  };
+}
+
+let ownersCache: HubSpotOwner[] | null = null;
+let ownersCacheTimestamp = 0;
+const OWNERS_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+/**
+ * Fetch all HubSpot owners with caching
+ * @returns Array of HubSpot owners
+ */
+export async function fetchHubSpotOwners(): Promise<HubSpotOwner[]> {
+  const now = Date.now();
+  if (ownersCache && (now - ownersCacheTimestamp) < OWNERS_CACHE_TTL) {
+    return ownersCache;
+  }
+
+  const allOwners: HubSpotOwner[] = [];
+  let after: string | undefined;
+
+  do {
+    const path = after 
+      ? `/crm/v3/owners/?limit=100&after=${after}`
+      : "/crm/v3/owners/?limit=100";
+    
+    const data = await hubspotFetch(path, {
+      method: "GET"
+    }) as HubSpotOwnersResponse;
+
+    allOwners.push(...data.results);
+    after = data.paging?.next?.after;
+  } while (after);
+
+  ownersCache = allOwners;
+  ownersCacheTimestamp = now;
+  return allOwners;
+}
+
+/**
+ * Resolve owner ID from display name (e.g., "Rocci Damole" -> owner ID)
+ * @param displayName - Full name of the owner
+ * @returns Owner ID or null if not found
+ */
+export async function resolveOwnerIdByName(displayName: string): Promise<string | null> {
+  const owners = await fetchHubSpotOwners();
+  const normalized = displayName.trim().toLowerCase();
+  
+  const match = owners.find((owner) => {
+    const fullName = `${owner.firstName} ${owner.lastName}`.trim().toLowerCase();
+    return fullName === normalized;
+  });
+
+  return match ? match.id : null;
+}
+
 /**
  * Make a fetch request to the HubSpot API with proper authentication
  * @param path - The API path (e.g., "/crm/v3/objects/contacts/search")
