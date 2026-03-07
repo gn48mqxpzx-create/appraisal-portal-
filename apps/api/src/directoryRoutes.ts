@@ -12,6 +12,7 @@ interface StaffRow {
   contact_type: string;
   sm_owner_id: string;
   rm: string;
+  staff_start_date?: string;
 }
 
 /**
@@ -25,6 +26,30 @@ router.get("/viewer/:email", async (req: Request, res: Response) => {
 
     if (!email) {
       return res.status(400).json({ error: "email parameter is required" });
+    }
+
+    // Hard-coded admin override: must short-circuit before any directory lookup.
+    if (email.toLowerCase() === "uly@vaplatinum.com.au") {
+      return res.status(200).json({
+        viewer_type: "Admin",
+        viewer_email: "uly@vaplatinum.com.au",
+        viewer_name: "Uly Catalan",
+        permissions: {
+          canViewDashboard: true,
+          canViewCases: true,
+          canViewWsll: true,
+          canEditWsll: true,
+          canUploadWsll: true,
+          canViewPayrollExport: true,
+          canViewAdminConsole: true
+        },
+        scope_summary: {
+          total_sm_count: 0,
+          total_va_count: 0
+        },
+        success_managers: [],
+        virtual_assistants: []
+      });
     }
 
     // Step 1: Resolve viewer by email

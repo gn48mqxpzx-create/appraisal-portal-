@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import styles from './App.module.css';
 import SideNav from './components/layout/SideNav';
 import Dashboard from './pages/Dashboard';
 import AppraisalCases from './pages/AppraisalCases';
@@ -6,6 +7,7 @@ import WsllUpload from './pages/WsllUpload';
 import PayrollExport from './pages/PayrollExport';
 import AdminConsole from './pages/AdminConsole';
 import LoginPage from './pages/LoginPage';
+import CaseDetailPage from './pages/CaseDetailPage';
 import { 
   ViewerSession, 
   enrichViewerSession, 
@@ -20,6 +22,7 @@ function App() {
   const [viewerSession, setViewerSession] = useState<ViewerSession | null>(null);
   const [isCheckingSession, setIsCheckingSession] = useState(true);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [selectedStaffId, setSelectedStaffId] = useState<string | null>(null);
 
   // Check for existing session on mount
   useEffect(() => {
@@ -60,17 +63,21 @@ function App() {
     setCurrentPage(pageId);
   };
 
+  const handleViewCase = (staffId: string) => {
+    setSelectedStaffId(staffId);
+    setCurrentPage('case-detail');
+  };
+
+  const handleBackToCases = () => {
+    setSelectedStaffId(null);
+    setCurrentPage('cases');
+  };
+
   // Show loading state while checking for existing session
   if (isCheckingSession) {
     return (
-      <div style={{ 
-        backgroundColor: '#f9fafb', 
-        minHeight: '100vh', 
-        display: 'flex', 
-        alignItems: 'center', 
-        justifyContent: 'center' 
-      }}>
-        <p style={{ fontSize: '14px', color: '#6b7280' }}>Loading...</p>
+      <div className={styles.loadingContainer}>
+        <p className={styles.loadingText}>Loading...</p>
       </div>
     );
   }
@@ -85,7 +92,7 @@ function App() {
   if (!canAccessCurrentPage) {
     // Show access denied message
     return (
-      <div style={{ display: 'flex', minHeight: '100vh' }}>
+      <div className={styles.appLayout}>
         <SideNav 
           currentPage={currentPage} 
           onNavigate={handleNavigate} 
@@ -94,35 +101,20 @@ function App() {
           sidebarCollapsed={sidebarCollapsed}
           onToggleSidebar={() => setSidebarCollapsed(!sidebarCollapsed)}
         />
-        <div style={{ marginLeft: sidebarCollapsed ? '80px' : '280px', flex: 1, width: sidebarCollapsed ? 'calc(100% - 80px)' : 'calc(100% - 280px)', transition: 'all 0.3s ease' }}>
-          <div style={{ backgroundColor: '#f9fafb', minHeight: '100vh', padding: '24px' }}>
-            <div style={{ maxWidth: '1400px', margin: '0 auto' }}>
-              <div style={{
-                backgroundColor: '#fef2f2',
-                border: '2px solid #fecaca',
-                borderRadius: '8px',
-                padding: '60px 24px',
-                textAlign: 'center'
-              }}>
-                <div style={{ fontSize: '48px', marginBottom: '16px' }}>🔒</div>
-                <p style={{ fontSize: '18px', margin: '0 0 8px 0', fontWeight: '600', color: '#991b1b' }}>
+        <div className={`${styles.mainContent} ${sidebarCollapsed ? styles.mainContentExpanded : styles.mainContentCollapsed}`}>
+          <div className={styles.accessDeniedContainer}>
+            <div className={styles.accessDeniedInner}>
+              <div className={styles.accessDeniedBox}>
+                <div className={styles.accessDeniedIcon}>🔒</div>
+                <p className={styles.accessDeniedTitle}>
                   Access Denied
                 </p>
-                <p style={{ fontSize: '14px', margin: '0 0 20px 0', color: '#991b1b' }}>
+                <p className={styles.accessDeniedMessage}>
                   You don't have permission to access this page.
                 </p>
                 <button
                   onClick={() => setCurrentPage('dashboard')}
-                  style={{
-                    padding: '10px 20px',
-                    backgroundColor: '#3b82f6',
-                    color: '#fff',
-                    border: 'none',
-                    borderRadius: '6px',
-                    fontSize: '14px',
-                    fontWeight: '600',
-                    cursor: 'pointer'
-                  }}
+                  className={styles.accessDeniedButton}
                 >
                   Go to Dashboard
                 </button>
@@ -139,7 +131,17 @@ function App() {
       case 'dashboard':
         return <Dashboard viewerSession={viewerSession} />;
       case 'cases':
-        return <AppraisalCases viewerSession={viewerSession} />;
+        return <AppraisalCases viewerSession={viewerSession} onViewCase={handleViewCase} />;
+      case 'case-detail':
+        return selectedStaffId ? (
+          <CaseDetailPage 
+            staffId={selectedStaffId} 
+            viewerSession={viewerSession} 
+            onNavigateBack={handleBackToCases}
+          />
+        ) : (
+          <Dashboard viewerSession={viewerSession} />
+        );
       case 'wsll':
         return <WsllUpload viewerSession={viewerSession} />;
       case 'payroll':
@@ -152,7 +154,7 @@ function App() {
   };
 
   return (
-    <div style={{ display: 'flex', minHeight: '100vh' }}>
+    <div className={styles.appLayout}>
       <SideNav 
         currentPage={currentPage} 
         onNavigate={handleNavigate} 
@@ -161,7 +163,7 @@ function App() {
         sidebarCollapsed={sidebarCollapsed}
         onToggleSidebar={() => setSidebarCollapsed(!sidebarCollapsed)}
       />
-      <div style={{ marginLeft: sidebarCollapsed ? '80px' : '280px', flex: 1, width: sidebarCollapsed ? 'calc(100% - 80px)' : 'calc(100% - 280px)', transition: 'all 0.3s ease' }}>
+      <div className={`${styles.mainContent} ${sidebarCollapsed ? styles.mainContentExpanded : styles.mainContentCollapsed}`}>
         {renderPage()}
       </div>
     </div>

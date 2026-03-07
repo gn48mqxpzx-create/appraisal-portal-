@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { ViewerSession } from '../utils/auth';
+import styles from './AppraisalCases.module.css';
 
 interface Employee {
   staff_id?: string;
@@ -9,36 +10,29 @@ interface Employee {
   email?: string;
   staff_role?: string;
   staffRole?: string;
+  staff_start_date?: string;
   staffStartDate?: string;
 }
 
 interface AppraisalCasesProps {
   viewerSession: ViewerSession | null;
+  onViewCase: (staffId: string) => void;
 }
 
-export function AppraisalCases({ viewerSession }: AppraisalCasesProps) {
+export function AppraisalCases({ viewerSession, onViewCase }: AppraisalCasesProps) {
   if (!viewerSession) {
     return (
-      <div style={{ backgroundColor: '#f9fafb', minHeight: '100vh', padding: '24px' }}>
-        <div style={{ maxWidth: '1400px', margin: '0 auto' }}>
-          <h1 style={{ fontSize: '28px', fontWeight: '600', margin: '0 0 8px 0', color: '#1f2937' }}>
+      <div className={styles.emptyStateContainer}>
+        <div className={styles.innerContainer}>
+          <h1 className={styles.title}>
             Appraisal Cases
           </h1>
-          <p style={{ fontSize: '14px', color: '#6b7280', marginBottom: '24px' }}>
+          <p className={styles.subtitleWithMargin}>
             View and manage appraisal cases for employees in your scope
           </p>
 
-          <div
-            style={{
-              backgroundColor: '#f3f4f6',
-              border: '2px dashed #d1d5db',
-              borderRadius: '8px',
-              padding: '60px 24px',
-              textAlign: 'center',
-              color: '#6b7280'
-            }}
-          >
-            <p style={{ fontSize: '16px', margin: 0 }}>
+          <div className={styles.emptyState}>
+            <p className={styles.emptyStateText}>
               Please log in to view your appraisal cases
             </p>
           </div>
@@ -53,10 +47,21 @@ export function AppraisalCases({ viewerSession }: AppraisalCasesProps) {
       const start = new Date(startDate);
       if (isNaN(start.getTime())) return '—';
       const now = new Date();
-      const months = (now.getFullYear() - start.getFullYear()) * 12 + (now.getMonth() - start.getMonth());
-      if (months < 12) return `${months}mo`;
-      const years = Math.floor(months / 12);
-      return `${years}yr${years > 1 ? 's' : ''}`;
+      const totalMonths = (now.getFullYear() - start.getFullYear()) * 12 + (now.getMonth() - start.getMonth());
+      
+      if (totalMonths < 0) return '—';
+      if (totalMonths === 0) return '0m';
+      
+      const years = Math.floor(totalMonths / 12);
+      const months = totalMonths % 12;
+      
+      if (years === 0) {
+        return `${months}m`;
+      } else if (months === 0) {
+        return `${years}y`;
+      } else {
+        return `${years}y ${months}m`;
+      }
     } catch {
       return '—';
     }
@@ -67,9 +72,10 @@ export function AppraisalCases({ viewerSession }: AppraisalCasesProps) {
   const getEmail = (emp: Employee): string => emp.email || '—';
   const getStaffRole = (emp: Employee): string => emp.staff_role || emp.staffRole || '—';
   const getStartDate = (emp: Employee): string => {
-    if (!emp.staffStartDate) return '—';
+    const startDate = emp.staff_start_date || emp.staffStartDate;
+    if (!startDate) return '—';
     try {
-      return new Date(emp.staffStartDate).toLocaleDateString('en-US', {
+      return new Date(startDate).toLocaleDateString('en-US', {
         year: 'numeric',
         month: 'short',
         day: 'numeric'
@@ -79,19 +85,23 @@ export function AppraisalCases({ viewerSession }: AppraisalCasesProps) {
     }
   };
 
+  const getTenure = (emp: Employee): string => {
+    return calculateTenure(emp.staff_start_date || emp.staffStartDate);
+  };
+
   const employees = viewerSession?.viewer_type === 'RM'
     ? (viewerSession?.virtual_assistants || [])
     : (viewerSession?.virtual_assistants || []);
 
   return (
-    <div style={{ backgroundColor: '#f9fafb', minHeight: '100vh', padding: '24px' }}>
-      <div style={{ maxWidth: '1400px', margin: '0 auto' }}>
+    <div className={styles.container}>
+      <div className={styles.innerContainer}>
         {/* Header */}
-        <div style={{ marginBottom: '24px' }}>
-          <h1 style={{ fontSize: '28px', fontWeight: '600', margin: '0 0 8px 0', color: '#1f2937' }}>
+        <div className={styles.header}>
+          <h1 className={styles.title}>
             Appraisal Cases
           </h1>
-          <p style={{ fontSize: '14px', color: '#6b7280', margin: 0 }}>
+          <p className={styles.subtitle}>
             View and manage appraisal cases for employees in your scope
           </p>
         </div>
@@ -99,8 +109,8 @@ export function AppraisalCases({ viewerSession }: AppraisalCasesProps) {
         {/* Viewer Summary */}
         {viewerSession && (
         <>
-        <div style={{ marginBottom: '24px', backgroundColor: '#eff6ff', padding: '16px', borderRadius: '8px', border: '1px solid #bfdbfe' }}>
-          <p style={{ margin: 0, fontSize: '13px', color: '#1e40af' }}>
+        <div className={styles.viewerSummary}>
+          <p className={styles.viewerSummaryText}>
             <strong>{viewerSession.viewer_name}</strong> ({viewerSession.role})
             {' • '}
             {viewerSession.scope_summary.total_va_count} appraisals
@@ -108,42 +118,42 @@ export function AppraisalCases({ viewerSession }: AppraisalCasesProps) {
         </div>
 
         {/* Cases Table */}
-        <div style={{ backgroundColor: '#fff', borderRadius: '8px', border: '1px solid #e5e7eb', overflow: 'hidden' }}>
-          <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+        <div className={styles.tableWrapper}>
+          <div className={styles.tableScroll}>
+            <table className={styles.table}>
               <thead>
-                <tr style={{ backgroundColor: '#f9fafb', borderBottom: '1px solid #e5e7eb' }}>
-                  <th style={{ padding: '12px 16px', textAlign: 'left', fontWeight: '600', color: '#374151' }}>
+                <tr className={styles.tableHeader}>
+                  <th className={styles.tableHeaderCell}>
                     Staff ID
                   </th>
-                  <th style={{ padding: '12px 16px', textAlign: 'left', fontWeight: '600', color: '#374151' }}>
+                  <th className={styles.tableHeaderCell}>
                     Full Name
                   </th>
-                  <th style={{ padding: '12px 16px', textAlign: 'left', fontWeight: '600', color: '#374151' }}>
+                  <th className={styles.tableHeaderCell}>
                     Email
                   </th>
-                  <th style={{ padding: '12px 16px', textAlign: 'left', fontWeight: '600', color: '#374151' }}>
+                  <th className={styles.tableHeaderCell}>
                     Role
                   </th>
-                  <th style={{ padding: '12px 16px', textAlign: 'center', fontWeight: '600', color: '#374151' }}>
+                  <th className={styles.tableHeaderCellCenter}>
                     Start Date
                   </th>
-                  <th style={{ padding: '12px 16px', textAlign: 'center', fontWeight: '600', color: '#374151' }}>
+                  <th className={styles.tableHeaderCellCenter}>
                     Tenure
                   </th>
-                  <th style={{ padding: '12px 16px', textAlign: 'right', fontWeight: '600', color: '#374151' }}>
+                  <th className={styles.tableHeaderCellRight}>
                     Current Comp
                   </th>
-                  <th style={{ padding: '12px 16px', textAlign: 'right', fontWeight: '600', color: '#374151' }}>
+                  <th className={styles.tableHeaderCellRight}>
                     Proposed Adj
                   </th>
-                  <th style={{ padding: '12px 16px', textAlign: 'right', fontWeight: '600', color: '#374151' }}>
+                  <th className={styles.tableHeaderCellRight}>
                     New Comp
                   </th>
-                  <th style={{ padding: '12px 16px', textAlign: 'center', fontWeight: '600', color: '#374151' }}>
+                  <th className={styles.tableHeaderCellCenter}>
                     Status
                   </th>
-                  <th style={{ padding: '12px 16px', textAlign: 'center', fontWeight: '600', color: '#374151' }}>
+                  <th className={styles.tableHeaderCellCenter}>
                     Action
                   </th>
                 </tr>
@@ -151,7 +161,7 @@ export function AppraisalCases({ viewerSession }: AppraisalCasesProps) {
               <tbody>
                 {employees.length === 0 ? (
                   <tr>
-                    <td colSpan={11} style={{ padding: '24px', textAlign: 'center', color: '#9ca3af' }}>
+                    <td colSpan={11} className={styles.emptyRow}>
                       No cases to display
                     </td>
                   </tr>
@@ -159,68 +169,46 @@ export function AppraisalCases({ viewerSession }: AppraisalCasesProps) {
                   employees.map((emp, idx) => (
                     <tr
                       key={idx}
-                      style={{
-                        borderBottom: idx < employees.length - 1 ? '1px solid #f3f4f6' : 'none',
-                        backgroundColor: idx % 2 === 0 ? '#fff' : '#f9fafb',
-                        transition: 'background-color 0.2s'
-                      }}
+                      className={`${styles.tableRow} ${idx % 2 === 0 ? styles.tableRowEven : styles.tableRowOdd} ${idx < employees.length - 1 ? styles.tableRowNotLast : ''}`}
                     >
-                      <td style={{ padding: '12px 16px', color: '#1f2937' }}>
-                        <code style={{ fontSize: '12px', backgroundColor: '#f3f4f6', padding: '2px 6px', borderRadius: '3px' }}>
+                      <td className={styles.cellDefault}>
+                        <code className={styles.cellCode}>
                           {getStaffId(emp)}
                         </code>
                       </td>
-                      <td style={{ padding: '12px 16px', color: '#1f2937' }}>
+                      <td className={styles.cellDefault}>
                         {getFullName(emp)}
                       </td>
-                      <td style={{ padding: '12px 16px', color: '#6b7280', fontSize: '12px' }}>
+                      <td className={styles.cellEmail}>
                         {getEmail(emp)}
                       </td>
-                      <td style={{ padding: '12px 16px', color: '#1f2937' }}>
+                      <td className={styles.cellDefault}>
                         {getStaffRole(emp)}
                       </td>
-                      <td style={{ padding: '12px 16px', color: '#6b7280', textAlign: 'center' }}>
+                      <td className={styles.cellCenter}>
                         {getStartDate(emp)}
                       </td>
-                      <td style={{ padding: '12px 16px', color: '#1f2937', textAlign: 'center', fontWeight: '500' }}>
-                        {calculateTenure(emp.staffStartDate)}
+                      <td className={styles.cellCenterBold}>
+                        {getTenure(emp)}
                       </td>
-                      <td style={{ padding: '12px 16px', color: '#9ca3af', textAlign: 'right' }}>
+                      <td className={styles.cellRight}>
                         —
                       </td>
-                      <td style={{ padding: '12px 16px', color: '#9ca3af', textAlign: 'right' }}>
+                      <td className={styles.cellRight}>
                         —
                       </td>
-                      <td style={{ padding: '12px 16px', color: '#9ca3af', textAlign: 'right' }}>
+                      <td className={styles.cellRight}>
                         —
                       </td>
-                      <td style={{ padding: '12px 16px', textAlign: 'center' }}>
-                        <span
-                          style={{
-                            display: 'inline-block',
-                            padding: '4px 8px',
-                            backgroundColor: '#f3f4f6',
-                            color: '#6b7280',
-                            borderRadius: '4px',
-                            fontSize: '11px',
-                            fontWeight: '600'
-                          }}
-                        >
+                      <td className={styles.cellCenter}>
+                        <span className={styles.statusBadge}>
                           Not Started
                         </span>
                       </td>
-                      <td style={{ padding: '12px 16px', textAlign: 'center' }}>
-                        <button
-                          style={{
-                            padding: '6px 12px',
-                            backgroundColor: '#3b82f6',
-                            color: '#fff',
-                            border: 'none',
-                            borderRadius: '4px',
-                            fontSize: '12px',
-                            fontWeight: '600',
-                            cursor: 'pointer'
-                          }}
+                      <td className={styles.cellCenter}>
+                        <button 
+                          className={styles.actionButton}
+                          onClick={() => onViewCase(getStaffId(emp))}
                         >
                           View Case
                         </button>

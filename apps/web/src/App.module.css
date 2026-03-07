@@ -1,0 +1,84 @@
+.loadingContainer {
+  background-color: #f9fafb;
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.loadingText {
+  font-size: 14px;
+  color: #6b7280;
+}
+
+.appLayout {
+  display: flex;
+  min-height: 100vh;
+}
+
+.mainContent {
+  flex: 1;
+  transition: all 0.3s ease;
+}
+
+.mainContentExpanded {
+  margin-left: 80px;
+  width: calc(100% - 80px);
+}
+
+.mainContentCollapsed {
+  margin-left: 280px;
+  width: calc(100% - 280px);
+}
+
+.accessDeniedContainer {
+  background-color: #f9fafb;
+  min-height: 100vh;
+  padding: 24px;
+}
+
+.accessDeniedInner {
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+.accessDeniedBox {
+  background-color: #fef2f2;
+  border: 2px solid #fecaca;
+  border-radius: 8px;
+  padding: 60px 24px;
+  text-align: center;
+}
+
+.accessDeniedIcon {
+  font-size: 48px;
+  margin-bottom: 16px;
+}
+
+.accessDeniedTitle {
+  font-size: 18px;
+  margin: 0 0 8px 0;
+  font-weight: 600;
+  color: #991b1b;
+}
+
+.accessDeniedMessage {
+  font-size: 14px;
+  margin: 0 0 20px 0;
+  color: #991b1b;
+}
+
+.accessDeniedButton {
+  padding: 10px 20px;
+  background-color: #3b82f6;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.accessDeniedButton:hover {
+  background-color: #2563eb;
+}

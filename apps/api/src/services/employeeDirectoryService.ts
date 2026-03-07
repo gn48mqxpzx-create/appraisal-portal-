@@ -32,20 +32,10 @@ interface StaffRow {
   sm_own_owner_id: string;
   rm: string;
   employee_type: EmployeeType;
+  staff_start_date?: string;
 }
 
-function toStaffRow(record: {
-  hubspotContactId: string;
-  staffId: string;
-  fullName: string;
-  email: string;
-  staffRole: string;
-  contactType: string;
-  smName: string | null;
-  smOwnerId: string | null;
-  rmName: string | null;
-  employeeType: string;
-}): StaffRow {
+function toStaffRow(record: any): StaffRow {
   return {
     hubspot_id: record.hubspotContactId,
     staff_id: record.staffId,
@@ -56,7 +46,8 @@ function toStaffRow(record: {
     sm_owner_id: record.smName || "",
     sm_own_owner_id: record.smOwnerId || "",
     rm: record.rmName || "",
-    employee_type: record.employeeType as EmployeeType
+    employee_type: record.employeeType as EmployeeType,
+    staff_start_date: record.staffStartDate ? record.staffStartDate.toISOString() : undefined
   };
 }
 
