@@ -1,5 +1,5 @@
 import { Router, type Request, type Response } from "express";
-import { getSMDirectory, getRMDirectory, syncEmployeeDirectory, getViewerByEmail } from "./services/employeeDirectoryService";
+import { getSMDirectory, getRMDirectory, syncEmployeeDirectory, getViewerByEmail, getAdminDirectory } from "./services/employeeDirectoryService";
 
 const router = Router();
 
@@ -28,8 +28,10 @@ router.get("/viewer/:email", async (req: Request, res: Response) => {
       return res.status(400).json({ error: "email parameter is required" });
     }
 
-    // Hard-coded admin override: must short-circuit before any directory lookup.
+    // Hard-coded admin override: keep admin permissions but build scope from live directory data.
     if (email.toLowerCase() === "uly@vaplatinum.com.au") {
+      const adminDirectory = await getAdminDirectory();
+
       return res.status(200).json({
         viewer_type: "Admin",
         viewer_email: "uly@vaplatinum.com.au",
@@ -44,11 +46,11 @@ router.get("/viewer/:email", async (req: Request, res: Response) => {
           canViewAdminConsole: true
         },
         scope_summary: {
-          total_sm_count: 0,
-          total_va_count: 0
+          total_sm_count: adminDirectory.success_managers.length,
+          total_va_count: adminDirectory.virtual_assistants.length
         },
-        success_managers: [],
-        virtual_assistants: []
+        success_managers: adminDirectory.success_managers,
+        virtual_assistants: adminDirectory.virtual_assistants
       });
     }
 

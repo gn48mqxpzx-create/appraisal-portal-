@@ -29,10 +29,20 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
   useEffect(() => {
     // Find the employee from the viewer session
     if (viewerSession) {
-      const employees = viewerSession.virtual_assistants || [];
-      const found = employees.find((emp: Employee) => 
+      // Search in virtual_assistants first
+      const virtualAssistants = viewerSession.virtual_assistants || [];
+      let found = virtualAssistants.find((emp: Employee) => 
         (emp.staff_id || emp.staffId) === staffId
       );
+      
+      // If not found and success_managers exists, search there too (for Admin/RM)
+      if (!found && viewerSession.success_managers) {
+        const successManagers = viewerSession.success_managers || [];
+        found = successManagers.find((emp: Employee) => 
+          (emp.staff_id || emp.staffId) === staffId
+        );
+      }
+      
       setEmployee(found || null);
     }
   }, [staffId, viewerSession]);

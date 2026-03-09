@@ -141,6 +141,8 @@ export function canAccessPage(permissions: Permissions, pageId: string): boolean
       return permissions.canViewDashboard;
     case 'cases':
       return permissions.canViewCases;
+        case 'case-detail':
+          return permissions.canViewCases;
     case 'wsll':
       return permissions.canViewWsll;
     case 'payroll':

@@ -1,0 +1,107 @@
+.page {
+  background: linear-gradient(180deg, #f8fafc 0%, #f3f4f6 100%);
+  min-height: 100vh;
+  padding: 24px;
+}
+
+.container {
+  max-width: 1000px;
+  margin: 0 auto;
+}
+
+.title {
+  font-size: 28px;
+  font-weight: 600;
+  margin: 0 0 8px;
+  color: #1f2937;
+}
+
+.subtitle {
+  font-size: 14px;
+  color: #6b7280;
+  margin: 0 0 24px;
+}
+
+.card {
+  background-color: #ffffff;
+  border-radius: 12px;
+  border: 1px solid #e5e7eb;
+  padding: 24px;
+  box-shadow: 0 6px 18px rgba(17, 24, 39, 0.06);
+}
+
+.cardHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.sectionTitle {
+  margin: 0;
+  font-size: 20px;
+  color: #111827;
+  font-weight: 600;
+}
+
+.sectionSubtitle {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: #6b7280;
+}
+
+.syncButton {
+  border: 0;
+  border-radius: 10px;
+  padding: 10px 16px;
+  background-color: #111827;
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.syncButtonDisabled {
+  background-color: #9ca3af;
+  cursor: not-allowed;
+}
+
+.statusPanel {
+  margin-top: 18px;
+  border: 1px solid #f3f4f6;
+  border-radius: 10px;
+  background-color: #f9fafb;
+  padding: 14px;
+}
+
+.statusGrid {
+  display: grid;
+  gap: 8px;
+}
+
+.statusText {
+  margin: 0;
+  font-size: 13px;
+  color: #374151;
+}
+
+.emptyState {
+  margin: 0;
+  font-size: 13px;
+  color: #6b7280;
+}
+
+@media (max-width: 640px) {
+  .page {
+    padding: 16px;
+  }
+
+  .card {
+    padding: 18px;
+  }
+
+  .title {
+    font-size: 24px;
+  }
+}

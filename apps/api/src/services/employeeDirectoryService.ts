@@ -224,6 +224,38 @@ export async function getRMDirectory(
 }
 
 /**
+ * Get full directory scope for Admin users.
+ */
+export async function getAdminDirectory(): Promise<{
+  success_managers: StaffRow[];
+  virtual_assistants: StaffRow[];
+}> {
+  const [smRecords, vaRecords] = await Promise.all([
+    prisma.employeeDirectory.findMany({
+      where: {
+        employeeType: "SM"
+      },
+      orderBy: {
+        fullName: "asc"
+      }
+    }),
+    prisma.employeeDirectory.findMany({
+      where: {
+        employeeType: "VA"
+      },
+      orderBy: {
+        fullName: "asc"
+      }
+    })
+  ]);
+
+  return {
+    success_managers: smRecords.map(toStaffRow),
+    virtual_assistants: vaRecords.map(toStaffRow)
+  };
+}
+
+/**
  * Get viewer by email and determine their role (SM or RM)
  * Returns viewer metadata including type, name, and owner ID if applicable
  */
@@ -294,9 +326,15 @@ export async function getViewerByEmail(email: string): Promise<{
 /**
  * Sync employee directory from HubSpot
  * Fetches active VA and SM contacts and upserts into employee_directory
- * Returns count of synced records
+ * Returns sync summary
  */
-export async function syncEmployeeDirectory(): Promise<{ synced: number }> {
+export async function syncEmployeeDirectory(): Promise<{
+  result: "success";
+  synced: number;
+  skipped: number;
+  errors: string[];
+  timestamp: string;
+}> {
   console.log("[syncEmployeeDirectory] Starting sync...");
 
   try {
@@ -339,6 +377,7 @@ export async function syncEmployeeDirectory(): Promise<{ synced: number }> {
 
     let syncedCount = 0;
     let skippedCount = 0;
+    const errors: string[] = [];
 
     for (let i = 0; i < contacts.length; i++) {
       try {
@@ -455,17 +494,25 @@ export async function syncEmployeeDirectory(): Promise<{ synced: number }> {
         syncedCount++;
       } catch (error) {
         const contactId = contacts[i]?.id || "unknown";
+        const errorMessage = error instanceof Error ? error.message : "Unknown error";
         console.error(
           `[syncEmployeeDirectory] Error syncing contact ${contactId}:`,
-          error instanceof Error ? error.message : "Unknown error"
+          errorMessage
         );
+        errors.push(`Contact ${contactId}: ${errorMessage}`);
       }
     }
 
     console.log(
       `[syncEmployeeDirectory] Sync complete. Synced: ${syncedCount}, Skipped: ${skippedCount}, Total: ${contacts.length}`
     );
-    return { synced: syncedCount };
+    return {
+      result: "success",
+      synced: syncedCount,
+      skipped: skippedCount,
+      errors,
+      timestamp: new Date().toISOString()
+    };
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : "Unknown error";
     console.error(`[syncEmployeeDirectory] Fatal error: ${errorMsg}`);
