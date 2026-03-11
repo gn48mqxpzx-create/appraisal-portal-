@@ -2711,7 +2711,7 @@ app.get("/hubspot/contact/:staffId", async (req, res) => {
 });
 
 // ============================================================================
-// MARKET VALUE MATRIX ENDPOINTS
+// MARKET VALUE MATRIX + ROLE LIBRARY ENDPOINTS
 // ============================================================================
 
 const TENURE_BANDS = ["T1", "T2", "T3", "T4"] as const;
@@ -2720,8 +2720,123 @@ type TenureBandLabel = (typeof TENURE_BANDS)[number];
 const isTenureBand = (v: unknown): v is TenureBandLabel =>
   typeof v === "string" && (TENURE_BANDS as readonly string[]).includes(v);
 
+const parseSalaryValue = (value: unknown): number | null => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const toTitleCase = (value: string): string =>
+  value
+    .toLowerCase()
+    .split(" ")
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
+
+const canonicalizeRoleLabel = (value: string): string =>
+  toTitleCase(value.trim().replace(/[^a-zA-Z0-9\s/&-]+/g, " ").replace(/\s+/g, " "));
+
+const normalizeRoleTokens = (value: string): string[] => {
+  const normalized = normalizeRoleName(value)
+    .replace(/\b(sr|senior)\b/g, "")
+    .replace(/\b(jr|junior)\b/g, "")
+    .replace(/\bii|iii|iv|1|2|3|4\b/g, "")
+    .replace(/\bfp\b/g, "financial planning")
+    .replace(/\bmb\b/g, "mortgage broker")
+    .replace(/\bparabroker\b/g, "credit analyst")
+    .replace(/\bclient\b/g, "customer")
+    .replace(/\bpersonal\b/g, "executive")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return normalized.split(" ").filter(Boolean);
+};
+
+const roleFamilyPatterns: Array<{ family: string; patterns: RegExp[] }> = [
+  { family: "Paraplanner", patterns: [/paraplanner/] },
+  { family: "Loan Processor", patterns: [/loan\s*processor/, /mortgage\s*broker\s*admin/] },
+  { family: "Credit Analyst", patterns: [/credit\s*analyst/, /parabroker/] },
+  { family: "Customer Service Representative", patterns: [/customer\s*service/, /client\s*service/] },
+  { family: "Administrative Assistant", patterns: [/administrative\s*assistant/, /admin\b/] },
+  { family: "Executive Assistant", patterns: [/executive\s*assistant/, /personal\s*assistant/] }
+];
+
+const scoreRoleSimilarity = (rawRole: string, targetRole: string): number => {
+  const rawNormalized = normalizeRoleName(rawRole);
+  const targetNormalized = normalizeRoleName(targetRole);
+
+  if (!rawNormalized || !targetNormalized) {
+    return 0;
+  }
+  if (rawNormalized === targetNormalized) {
+    return 1;
+  }
+
+  const rawTokens = new Set(normalizeRoleTokens(rawRole));
+  const targetTokens = new Set(normalizeRoleTokens(targetRole));
+
+  const intersection = [...rawTokens].filter((token) => targetTokens.has(token)).length;
+  const union = new Set([...rawTokens, ...targetTokens]).size || 1;
+  let score = intersection / union;
+
+  if (rawNormalized.includes(targetNormalized) || targetNormalized.includes(rawNormalized)) {
+    score = Math.max(score, 0.82);
+  }
+
+  const familyHit = roleFamilyPatterns.find((family) =>
+    family.patterns.some((pattern) => pattern.test(rawNormalized)) && normalizeRoleName(family.family) === targetNormalized
+  );
+  if (familyHit) {
+    score = Math.max(score, 0.9);
+  }
+
+  return Number(score.toFixed(4));
+};
+
+const getNewRoleSuggestion = (rawRole: string): string => canonicalizeRoleLabel(rawRole);
+
+type MatchStatus = "Learned" | "Auto-Matched" | "Needs Review" | "New Role Suggested" | "Approved";
+
+const findOrCreateStandardizedRole = async (payload: { standardizedRoleId?: string; roleName?: string; allowCreate?: boolean }) => {
+  const allowCreate = payload.allowCreate === true;
+
+  if (payload.standardizedRoleId) {
+    const byId = await prisma.standardizedRole.findUnique({ where: { id: payload.standardizedRoleId } });
+    if (!byId) {
+      throw new Error("Standardized role not found");
+    }
+    return byId;
+  }
+
+  const roleName = typeof payload.roleName === "string" ? canonicalizeRoleLabel(payload.roleName) : "";
+  if (!roleName) {
+    throw new Error("standardizedRoleId or roleName is required");
+  }
+
+  const existing = await prisma.standardizedRole.findFirst({
+    where: { roleName: { equals: roleName, mode: "insensitive" } }
+  });
+  if (existing) {
+    return existing;
+  }
+
+  if (!allowCreate) {
+    throw new Error("Standardized role not found");
+  }
+
+  return prisma.standardizedRole.create({
+    data: { roleName, isActive: true }
+  });
+};
+
 const normalizeRoleName = (value: string): string =>
   value.trim().toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+
+const getMatrixRoleName = (row: { roleName: string; standardizedRole?: { roleName: string } | null }) =>
+  row.standardizedRole?.roleName ?? row.roleName;
+
+const getMappedRoleName = (mapping: { mappedRoleName: string; standardizedRole?: { roleName: string } | null }) =>
+  mapping.standardizedRole?.roleName ?? mapping.mappedRoleName;
 
 const roleSimilarity = (rawRole: string, standardRole: string): number => {
   const raw = normalizeRoleName(rawRole);
@@ -2778,14 +2893,42 @@ app.get("/market-matrix", async (req, res) => {
       return;
     }
 
-    const roleFilter = typeof req.query.role === "string" ? req.query.role.trim() : undefined;
+    const roleFilter = typeof req.query.role === "string" ? req.query.role.trim() : "";
 
     const rows = await prisma.marketValueMatrix.findMany({
-      where: roleFilter ? { roleName: { equals: roleFilter, mode: "insensitive" } } : undefined,
+      where: roleFilter
+        ? {
+            OR: [
+              {
+                roleName: { equals: roleFilter, mode: "insensitive" }
+              },
+              {
+                standardizedRole: {
+                  roleName: { equals: roleFilter, mode: "insensitive" }
+                }
+              }
+            ]
+          }
+        : undefined,
+      include: {
+        standardizedRole: true
+      },
       orderBy: [{ roleName: "asc" }, { tenureBand: "asc" }]
     });
 
-    return res.status(200).json({ success: true, data: rows });
+    return res.status(200).json({
+      success: true,
+      data: rows.map((row) => ({
+        id: row.id,
+        standardizedRoleId: row.standardizedRoleId,
+        roleName: getMatrixRoleName(row),
+        tenureBand: row.tenureBand,
+        minSalary: row.minSalary,
+        maxSalary: row.maxSalary,
+        createdAt: row.createdAt,
+        updatedAt: row.updatedAt
+      }))
+    });
   } catch (error) {
     return res.status(500).json({ error: error instanceof Error ? error.message : "Failed to fetch market matrix" });
   }
@@ -2804,11 +2947,35 @@ app.get("/market-matrix/:role", async (req, res) => {
     }
 
     const rows = await prisma.marketValueMatrix.findMany({
-      where: { roleName: { equals: roleName, mode: "insensitive" } },
+      where: {
+        OR: [
+          {
+            roleName: { equals: roleName, mode: "insensitive" }
+          },
+          {
+            standardizedRole: {
+              roleName: { equals: roleName, mode: "insensitive" }
+            }
+          }
+        ]
+      },
+      include: { standardizedRole: true },
       orderBy: { tenureBand: "asc" }
     });
 
-    return res.status(200).json({ success: true, data: rows });
+    return res.status(200).json({
+      success: true,
+      data: rows.map((row) => ({
+        id: row.id,
+        standardizedRoleId: row.standardizedRoleId,
+        roleName: getMatrixRoleName(row),
+        tenureBand: row.tenureBand,
+        minSalary: row.minSalary,
+        maxSalary: row.maxSalary,
+        createdAt: row.createdAt,
+        updatedAt: row.updatedAt
+      }))
+    });
   } catch (error) {
     return res.status(500).json({ error: error instanceof Error ? error.message : "Failed to fetch market matrix for role" });
   }
@@ -2821,28 +2988,74 @@ app.post("/market-matrix", express.json(), async (req, res) => {
       return;
     }
 
-    const { roleName, tenureBand, minSalary, maxSalary } = req.body ?? {};
+    const { standardizedRoleId, roleName, tenureBand, minSalary, maxSalary } = req.body ?? {};
 
-    if (!roleName || typeof roleName !== "string" || !roleName.trim()) {
-      return res.status(400).json({ error: "roleName is required" });
-    }
     if (!isTenureBand(tenureBand)) {
       return res.status(400).json({ error: "tenureBand must be one of T1, T2, T3, T4" });
     }
-    if (minSalary === undefined || minSalary === null || isNaN(Number(minSalary))) {
+    const parsedMinSalary = parseSalaryValue(minSalary);
+    if (parsedMinSalary === null) {
       return res.status(400).json({ error: "minSalary must be a number" });
     }
-    if (maxSalary === undefined || maxSalary === null || isNaN(Number(maxSalary))) {
+    const parsedMaxSalary = parseSalaryValue(maxSalary);
+    if (parsedMaxSalary === null) {
       return res.status(400).json({ error: "maxSalary must be a number" });
     }
 
-    const row = await prisma.marketValueMatrix.upsert({
-      where: { roleName_tenureBand: { roleName: roleName.trim(), tenureBand } },
-      create: { roleName: roleName.trim(), tenureBand, minSalary: Number(minSalary), maxSalary: Number(maxSalary) },
-      update: { minSalary: Number(minSalary), maxSalary: Number(maxSalary) }
+    if (parsedMinSalary > parsedMaxSalary) {
+      return res.status(400).json({ error: "minSalary cannot be greater than maxSalary" });
+    }
+
+    const role = await findOrCreateStandardizedRole({ standardizedRoleId, roleName, allowCreate: true });
+
+    const existingSameRow = await prisma.marketValueMatrix.findFirst({
+      where: {
+        OR: [
+          { standardizedRoleId: role.id },
+          { roleName: { equals: role.roleName, mode: "insensitive" } }
+        ],
+        tenureBand
+      }
     });
 
-    return res.status(200).json({ success: true, data: row });
+    const row = existingSameRow
+      ? await prisma.marketValueMatrix.update({
+          where: { id: existingSameRow.id },
+          data: {
+            roleName: role.roleName,
+            standardizedRoleId: role.id,
+            minSalary: parsedMinSalary,
+            maxSalary: parsedMaxSalary
+          }
+        })
+      : await prisma.marketValueMatrix.create({
+          data: {
+            roleName: role.roleName,
+            standardizedRoleId: role.id,
+            tenureBand,
+            minSalary: parsedMinSalary,
+            maxSalary: parsedMaxSalary
+          }
+        });
+
+    const withRole = await prisma.marketValueMatrix.findUnique({
+      where: { id: row.id },
+      include: { standardizedRole: true }
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: withRole
+        ? {
+            id: withRole.id,
+            standardizedRoleId: withRole.standardizedRoleId,
+          roleName: getMatrixRoleName(withRole),
+            tenureBand: withRole.tenureBand,
+            minSalary: withRole.minSalary,
+            maxSalary: withRole.maxSalary
+          }
+        : null
+    });
   } catch (error) {
     return res.status(500).json({ error: error instanceof Error ? error.message : "Failed to upsert market matrix row" });
   }
@@ -2856,28 +3069,144 @@ app.put("/market-matrix/:id", express.json(), async (req, res) => {
     }
 
     const { id } = req.params;
-    const { minSalary, maxSalary } = req.body ?? {};
-
-    if (minSalary === undefined || isNaN(Number(minSalary))) {
-      return res.status(400).json({ error: "minSalary must be a number" });
-    }
-    if (maxSalary === undefined || isNaN(Number(maxSalary))) {
-      return res.status(400).json({ error: "maxSalary must be a number" });
-    }
+    const { standardizedRoleId, roleName, tenureBand, minSalary, maxSalary } = req.body ?? {};
 
     const existing = await prisma.marketValueMatrix.findUnique({ where: { id } });
     if (!existing) {
       return res.status(404).json({ error: "Market matrix row not found" });
     }
 
+    const role = standardizedRoleId || roleName
+      ? await findOrCreateStandardizedRole({ standardizedRoleId, roleName, allowCreate: true })
+      : existing.standardizedRoleId
+        ? await prisma.standardizedRole.findUnique({ where: { id: existing.standardizedRoleId } })
+        : await findOrCreateStandardizedRole({ roleName: existing.roleName, allowCreate: true });
+    if (!role) {
+      return res.status(400).json({ error: "Unable to resolve standardized role" });
+    }
+
+    const nextRoleId = role.id;
+    const nextTenureBand = tenureBand === undefined ? existing.tenureBand : tenureBand;
+
+    if (!isTenureBand(nextTenureBand)) {
+      return res.status(400).json({ error: "tenureBand must be one of T1, T2, T3, T4" });
+    }
+
+    const parsedMinSalary = minSalary === undefined ? Number(existing.minSalary) : parseSalaryValue(minSalary);
+    if (parsedMinSalary === null) {
+      return res.status(400).json({ error: "minSalary must be a number" });
+    }
+
+    const parsedMaxSalary = maxSalary === undefined ? Number(existing.maxSalary) : parseSalaryValue(maxSalary);
+    if (parsedMaxSalary === null) {
+      return res.status(400).json({ error: "maxSalary must be a number" });
+    }
+
+    if (parsedMinSalary > parsedMaxSalary) {
+      return res.status(400).json({ error: "minSalary cannot be greater than maxSalary" });
+    }
+
+    const duplicate = await prisma.marketValueMatrix.findFirst({
+      where: {
+        id: { not: id },
+        OR: [
+          { standardizedRoleId: nextRoleId },
+          { roleName: { equals: role.roleName, mode: "insensitive" } }
+        ],
+        tenureBand: nextTenureBand
+      },
+      select: { id: true }
+    });
+    if (duplicate) {
+      return res.status(409).json({ error: "A matrix row already exists for this role and tenure band" });
+    }
+
     const updated = await prisma.marketValueMatrix.update({
       where: { id },
-      data: { minSalary: Number(minSalary), maxSalary: Number(maxSalary) }
+      data: {
+        roleName: role.roleName,
+        standardizedRoleId: nextRoleId,
+        tenureBand: nextTenureBand,
+        minSalary: parsedMinSalary,
+        maxSalary: parsedMaxSalary
+      }
     });
 
-    return res.status(200).json({ success: true, data: updated });
+    const withRole = await prisma.marketValueMatrix.findUnique({
+      where: { id: updated.id },
+      include: { standardizedRole: true }
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: withRole
+        ? {
+            id: withRole.id,
+            standardizedRoleId: withRole.standardizedRoleId,
+          roleName: getMatrixRoleName(withRole),
+            tenureBand: withRole.tenureBand,
+            minSalary: withRole.minSalary,
+            maxSalary: withRole.maxSalary
+          }
+        : null
+    });
   } catch (error) {
     return res.status(500).json({ error: error instanceof Error ? error.message : "Failed to update market matrix row" });
+  }
+});
+
+// DELETE /market-matrix/:id  — delete a specific row by id
+app.delete("/market-matrix/:id", async (req, res) => {
+  try {
+    if (!ensureAdmin(req, res)) {
+      return;
+    }
+
+    const { id } = req.params;
+    const existing = await prisma.marketValueMatrix.findUnique({ where: { id } });
+    if (!existing) {
+      return res.status(404).json({ error: "Market matrix row not found" });
+    }
+
+    await prisma.marketValueMatrix.delete({ where: { id } });
+    return res.status(200).json({ success: true });
+  } catch (error) {
+    return res.status(500).json({ error: error instanceof Error ? error.message : "Failed to delete market matrix row" });
+  }
+});
+
+// DELETE /market-matrix/role/:role  — delete all rows for one role
+app.delete("/market-matrix/role/:role", async (req, res) => {
+  try {
+    if (!ensureAdmin(req, res)) {
+      return;
+    }
+
+    const roleName = decodeURIComponent(req.params.role ?? "").trim();
+    if (!roleName) {
+      return res.status(400).json({ error: "role is required" });
+    }
+
+    const standardizedRole = await prisma.standardizedRole.findFirst({
+      where: { roleName: { equals: roleName, mode: "insensitive" } }
+    });
+
+    if (!standardizedRole) {
+      return res.status(200).json({ success: true, deletedCount: 0 });
+    }
+
+    const deleted = await prisma.marketValueMatrix.deleteMany({
+      where: {
+        OR: [
+          { standardizedRoleId: standardizedRole.id },
+          { roleName: { equals: standardizedRole.roleName, mode: "insensitive" } }
+        ]
+      }
+    });
+
+    return res.status(200).json({ success: true, deletedCount: deleted.count });
+  } catch (error) {
+    return res.status(500).json({ error: error instanceof Error ? error.message : "Failed to delete role matrix" });
   }
 });
 
@@ -2889,15 +3218,23 @@ app.post("/market-matrix/role", express.json(), async (req, res) => {
     }
 
     const roleName = typeof req.body?.roleName === "string" ? req.body.roleName.trim() : "";
+    const standardizedRoleId = typeof req.body?.standardizedRoleId === "string" ? req.body.standardizedRoleId : "";
     const overwrite = req.body?.overwrite === true;
     const entries = Array.isArray(req.body?.entries) ? req.body.entries : [];
 
-    if (!roleName) {
-      return res.status(400).json({ error: "roleName is required" });
-    }
+    const standardizedRole = await findOrCreateStandardizedRole({
+      standardizedRoleId: standardizedRoleId || undefined,
+      roleName: roleName || undefined,
+      allowCreate: true
+    });
 
     const existingRows = await prisma.marketValueMatrix.findMany({
-      where: { roleName: { equals: roleName, mode: "insensitive" } },
+      where: {
+        OR: [
+          { standardizedRoleId: standardizedRole.id },
+          { roleName: { equals: standardizedRole.roleName, mode: "insensitive" } }
+        ]
+      },
       orderBy: { tenureBand: "asc" }
     });
 
@@ -2916,7 +3253,8 @@ app.post("/market-matrix/role", express.json(), async (req, res) => {
         minSalary: Number(entry.minSalary),
         maxSalary: Number(entry.maxSalary)
       }))
-      .filter((entry: any) => Number.isFinite(entry.minSalary) && Number.isFinite(entry.maxSalary));
+      .filter((entry: any) => Number.isFinite(entry.minSalary) && Number.isFinite(entry.maxSalary))
+      .filter((entry: any) => entry.minSalary <= entry.maxSalary);
 
     if (normalizedEntries.length === 0) {
       return res.status(400).json({ error: "At least one valid tenure band entry is required" });
@@ -2924,23 +3262,36 @@ app.post("/market-matrix/role", express.json(), async (req, res) => {
 
     const savedRows = await prisma.$transaction(
       normalizedEntries.map((entry: any) =>
-        prisma.marketValueMatrix.upsert({
+        prisma.marketValueMatrix.findFirst({
           where: {
-            roleName_tenureBand: {
-              roleName,
-              tenureBand: entry.tenureBand
-            }
-          },
-          create: {
-            roleName,
-            tenureBand: entry.tenureBand,
-            minSalary: entry.minSalary,
-            maxSalary: entry.maxSalary
-          },
-          update: {
-            minSalary: entry.minSalary,
-            maxSalary: entry.maxSalary
+            OR: [
+              { standardizedRoleId: standardizedRole.id },
+              { roleName: { equals: standardizedRole.roleName, mode: "insensitive" } }
+            ],
+            tenureBand: entry.tenureBand
           }
+        }).then((existingRow) => {
+          if (existingRow) {
+            return prisma.marketValueMatrix.update({
+              where: { id: existingRow.id },
+              data: {
+                roleName: standardizedRole.roleName,
+                standardizedRoleId: standardizedRole.id,
+                minSalary: entry.minSalary,
+                maxSalary: entry.maxSalary
+              }
+            });
+          }
+
+          return prisma.marketValueMatrix.create({
+            data: {
+              roleName: standardizedRole.roleName,
+              standardizedRoleId: standardizedRole.id,
+              tenureBand: entry.tenureBand,
+              minSalary: entry.minSalary,
+              maxSalary: entry.maxSalary
+            }
+          });
         })
       )
     );
@@ -2949,7 +3300,8 @@ app.post("/market-matrix/role", express.json(), async (req, res) => {
       success: true,
       data: {
         overwritten: overwrite,
-        roleName,
+        standardizedRoleId: standardizedRole.id,
+        roleName: standardizedRole.roleName,
         rows: savedRows
       }
     });
@@ -2961,48 +3313,95 @@ app.post("/market-matrix/role", express.json(), async (req, res) => {
 });
 
 // ============================================================================
-// ROLE ALIGNMENT ENDPOINTS (semi-automatic + persistent admin learning)
+// ROLE LIBRARY ENDPOINTS (intelligent matching + admin learning)
 // ============================================================================
 
-app.get("/role-alignment/raw-roles", async (req, res) => {
+app.get("/role-library/roles", async (req, res) => {
   try {
     if (!ensureAdmin(req, res)) {
       return;
     }
 
-    const rows = await prisma.employeeDirectory.findMany({
-      where: {
-        staffRole: {
-          not: ""
-        }
-      },
-      select: {
-        staffRole: true
-      },
-      distinct: ["staffRole"],
+    const includeInactive = req.query.includeInactive === "true";
+    const rows = await prisma.standardizedRole.findMany({
+      where: includeInactive ? undefined : { isActive: true },
       orderBy: {
-        staffRole: "asc"
+        roleName: "asc"
       }
     });
 
     return res.status(200).json({
       success: true,
-      data: rows.map((row) => row.staffRole).filter(Boolean)
+      data: rows
     });
   } catch (error) {
     return res.status(500).json({
-      error: error instanceof Error ? error.message : "Failed to fetch raw roles"
+      error: error instanceof Error ? error.message : "Failed to fetch standardized roles"
     });
   }
 });
 
-app.get("/role-alignment/mappings", async (req, res) => {
+app.post("/role-library/roles", express.json(), async (req, res) => {
+  try {
+    if (!ensureAdmin(req, res)) {
+      return;
+    }
+
+    const roleName = typeof req.body?.roleName === "string" ? canonicalizeRoleLabel(req.body.roleName) : "";
+    if (!roleName) {
+      return res.status(400).json({ error: "roleName is required" });
+    }
+
+    const role = await prisma.standardizedRole.upsert({
+      where: { roleName },
+      create: { roleName, isActive: true },
+      update: { isActive: true }
+    });
+
+    return res.status(200).json({ success: true, data: role });
+  } catch (error) {
+    return res.status(500).json({
+      error: error instanceof Error ? error.message : "Failed to upsert standardized role"
+    });
+  }
+});
+
+app.put("/role-library/roles/:id", express.json(), async (req, res) => {
+  try {
+    if (!ensureAdmin(req, res)) {
+      return;
+    }
+
+    const { id } = req.params;
+    const roleName = typeof req.body?.roleName === "string" ? canonicalizeRoleLabel(req.body.roleName) : undefined;
+    const isActive = typeof req.body?.isActive === "boolean" ? req.body.isActive : undefined;
+
+    const updated = await prisma.standardizedRole.update({
+      where: { id },
+      data: {
+        roleName,
+        isActive
+      }
+    });
+
+    return res.status(200).json({ success: true, data: updated });
+  } catch (error) {
+    return res.status(500).json({
+      error: error instanceof Error ? error.message : "Failed to update standardized role"
+    });
+  }
+});
+
+app.get("/role-library/mappings", async (req, res) => {
   try {
     if (!ensureAdmin(req, res)) {
       return;
     }
 
     const mappings = await prisma.roleAlignmentMapping.findMany({
+      include: {
+        standardizedRole: true
+      },
       orderBy: {
         sourceRoleName: "asc"
       }
@@ -3019,13 +3418,13 @@ app.get("/role-alignment/mappings", async (req, res) => {
   }
 });
 
-app.get("/role-alignment/analysis", async (req, res) => {
+app.get("/role-library/analysis", async (req, res) => {
   try {
     if (!ensureAdmin(req, res)) {
       return;
     }
 
-    const [rawRolesRows, matrixRows, savedMappings] = await Promise.all([
+    const [rawRolesRows, standardizedRoles, savedMappings] = await Promise.all([
       prisma.employeeDirectory.findMany({
         where: {
           staffRole: {
@@ -3037,60 +3436,102 @@ app.get("/role-alignment/analysis", async (req, res) => {
         },
         distinct: ["staffRole"]
       }),
-      prisma.marketValueMatrix.findMany({
-        select: {
-          roleName: true
-        },
-        distinct: ["roleName"]
+      prisma.standardizedRole.findMany({
+        where: { isActive: true },
+        orderBy: { roleName: "asc" }
       }),
-      prisma.roleAlignmentMapping.findMany()
+      prisma.roleAlignmentMapping.findMany({ include: { standardizedRole: true } })
     ]);
 
-    const standardRoles = Array.from(new Set(matrixRows.map((row) => row.roleName))).sort();
     const rawRoles = rawRolesRows.map((row) => row.staffRole).filter(Boolean).sort();
+    const roleCatalog = standardizedRoles.map((role) => role.roleName);
     const mappingBySource = new Map(savedMappings.map((mapping) => [normalizeRoleName(mapping.sourceRoleName), mapping]));
 
-    const autoMapped: Array<any> = [];
-    const needsReview: Array<any> = [];
-    const confirmedMappings: Array<any> = savedMappings
+    const reviewQueue: Array<any> = [];
+    const autoResolved: Array<any> = [];
+    const approvedLibrary: Array<any> = savedMappings
       .sort((a, b) => a.sourceRoleName.localeCompare(b.sourceRoleName))
       .map((mapping) => ({
         id: mapping.id,
         rawRole: mapping.sourceRoleName,
-        suggestedMatch: mapping.mappedRoleName,
-        finalMatch: mapping.mappedRoleName,
-        sourceOfMatch: mapping.matchSource
+        suggestedStandardRole: getMappedRoleName(mapping),
+        finalStandardRole: getMappedRoleName(mapping),
+        matchStatus: "Learned" as MatchStatus,
+        matchSource: "SAVED_RULE",
+        confidenceScore: mapping.confidenceScore ? Number(mapping.confidenceScore) : null,
+        standardizedRoleId: mapping.standardizedRoleId
       }));
 
+    const seenRawRole = new Set<string>();
+
     for (const rawRole of rawRoles) {
+      if (seenRawRole.has(normalizeRoleName(rawRole))) {
+        continue;
+      }
+      seenRawRole.add(normalizeRoleName(rawRole));
+
       const persisted = mappingBySource.get(normalizeRoleName(rawRole));
       if (persisted) {
         continue;
       }
 
-      const suggestion = getBestRoleSuggestion(rawRole, standardRoles);
-      const payload = {
+      let bestRole: string | null = null;
+      let bestScore = 0;
+
+      for (const roleName of roleCatalog) {
+        const score = scoreRoleSimilarity(rawRole, roleName);
+        if (score > bestScore) {
+          bestScore = score;
+          bestRole = roleName;
+        }
+      }
+
+      const newRoleCandidate = getNewRoleSuggestion(rawRole);
+      const payloadBase = {
         rawRole,
-        suggestedMatch: suggestion.suggestedMatch,
-        finalMatch: suggestion.autoMapped ? suggestion.suggestedMatch : null,
-        confidence: Number(suggestion.confidence.toFixed(3)),
-        sourceOfMatch: "AUTO"
+        suggestedStandardRole: bestRole,
+        finalStandardRole: null,
+        confidenceScore: Number(bestScore.toFixed(4)),
+        standardizedRoleSuggestion: newRoleCandidate
       };
 
-      if (suggestion.autoMapped) {
-        autoMapped.push(payload);
+      if (bestRole && bestScore >= 0.85) {
+        autoResolved.push({
+          ...payloadBase,
+          finalStandardRole: bestRole,
+          matchStatus: "Auto-Matched" as MatchStatus,
+          matchSource: "AUTO_SIMILARITY"
+        });
+      } else if (bestRole && bestScore >= 0.55) {
+        reviewQueue.push({
+          ...payloadBase,
+          matchStatus: "Needs Review" as MatchStatus,
+          matchSource: "AUTO_SIMILARITY"
+        });
       } else {
-        needsReview.push(payload);
+        reviewQueue.push({
+          ...payloadBase,
+          suggestedStandardRole: newRoleCandidate,
+          matchStatus: "New Role Suggested" as MatchStatus,
+          matchSource: "NEW_ROLE_SUGGESTION"
+        });
       }
     }
+
+    const unifiedTable = [
+      ...approvedLibrary.map((row) => ({ ...row, actionRequired: false })),
+      ...autoResolved.map((row) => ({ ...row, actionRequired: false })),
+      ...reviewQueue.map((row) => ({ ...row, actionRequired: true }))
+    ].sort((a, b) => a.rawRole.localeCompare(b.rawRole));
 
     return res.status(200).json({
       success: true,
       data: {
-        standardRoles,
-        autoMapped,
-        needsReview,
-        confirmedMappings
+        roleCatalog: standardizedRoles,
+        reviewQueue,
+        approvedLibrary,
+        autoResolved,
+        unifiedTable
       }
     });
   } catch (error) {
@@ -3100,35 +3541,33 @@ app.get("/role-alignment/analysis", async (req, res) => {
   }
 });
 
-app.post("/role-alignment/mappings", express.json(), async (req, res) => {
+app.post("/role-library/approve", express.json(), async (req, res) => {
   try {
     if (!ensureAdmin(req, res)) {
       return;
     }
 
     const sourceRoleName = typeof req.body?.sourceRoleName === "string" ? req.body.sourceRoleName.trim() : "";
-    const mappedRoleName = typeof req.body?.mappedRoleName === "string" ? req.body.mappedRoleName.trim() : "";
+    const standardizedRoleName = typeof req.body?.standardizedRoleName === "string" ? req.body.standardizedRoleName.trim() : "";
+    const standardizedRoleId = typeof req.body?.standardizedRoleId === "string" ? req.body.standardizedRoleId : "";
+    const allowCreateRole = req.body?.allowCreateRole === true;
+    const confidenceScore = req.body?.confidenceScore;
 
-    if (!sourceRoleName || !mappedRoleName) {
+    if (!sourceRoleName) {
       return res.status(400).json({
-        error: "sourceRoleName and mappedRoleName are required"
+        error: "sourceRoleName is required"
       });
     }
 
-    const matrixRoleExists = await prisma.marketValueMatrix.findFirst({
-      where: {
-        roleName: {
-          equals: mappedRoleName,
-          mode: "insensitive"
-        }
-      }
+    const role = await findOrCreateStandardizedRole({
+      standardizedRoleId: standardizedRoleId || undefined,
+      roleName: standardizedRoleName || undefined,
+      allowCreate: allowCreateRole
     });
 
-    if (!matrixRoleExists) {
-      return res.status(400).json({
-        error: "mappedRoleName must exist in Market Value Matrix"
-      });
-    }
+    const parsedConfidence = confidenceScore === undefined || confidenceScore === null
+      ? null
+      : parseSalaryValue(confidenceScore);
 
     const saved = await prisma.roleAlignmentMapping.upsert({
       where: {
@@ -3136,49 +3575,51 @@ app.post("/role-alignment/mappings", express.json(), async (req, res) => {
       },
       create: {
         sourceRoleName,
-        mappedRoleName: matrixRoleExists.roleName,
-        matchSource: "ADMIN_CONFIRMED"
+        mappedRoleName: role.roleName,
+        standardizedRoleId: role.id,
+        matchSource: "ADMIN_CONFIRMED",
+        confidenceScore: parsedConfidence
       },
       update: {
-        mappedRoleName: matrixRoleExists.roleName,
-        matchSource: "ADMIN_CONFIRMED"
+        mappedRoleName: role.roleName,
+        standardizedRoleId: role.id,
+        matchSource: "ADMIN_CONFIRMED",
+        confidenceScore: parsedConfidence
       }
     });
 
-    return res.status(200).json({ success: true, data: saved });
+    return res.status(200).json({
+      success: true,
+      data: await prisma.roleAlignmentMapping.findUnique({
+        where: { id: saved.id },
+        include: { standardizedRole: true }
+      })
+    });
   } catch (error) {
     return res.status(500).json({
-      error: error instanceof Error ? error.message : "Failed to save role mapping"
+      error: error instanceof Error ? error.message : "Failed to approve role mapping"
     });
   }
 });
 
-app.put("/role-alignment/mappings/:id", express.json(), async (req, res) => {
+app.put("/role-library/mappings/:id", express.json(), async (req, res) => {
   try {
     if (!ensureAdmin(req, res)) {
       return;
     }
 
     const { id } = req.params;
-    const mappedRoleName = typeof req.body?.mappedRoleName === "string" ? req.body.mappedRoleName.trim() : "";
+    const standardizedRoleName = typeof req.body?.standardizedRoleName === "string" ? req.body.standardizedRoleName.trim() : "";
+    const standardizedRoleId = typeof req.body?.standardizedRoleId === "string" ? req.body.standardizedRoleId : "";
 
-    if (!mappedRoleName) {
-      return res.status(400).json({ error: "mappedRoleName is required" });
-    }
+    const role = await findOrCreateStandardizedRole({
+      standardizedRoleId: standardizedRoleId || undefined,
+      roleName: standardizedRoleName || undefined,
+      allowCreate: false
+    }).catch(() => null);
 
-    const matrixRoleExists = await prisma.marketValueMatrix.findFirst({
-      where: {
-        roleName: {
-          equals: mappedRoleName,
-          mode: "insensitive"
-        }
-      }
-    });
-
-    if (!matrixRoleExists) {
-      return res.status(400).json({
-        error: "mappedRoleName must exist in Market Value Matrix"
-      });
+    if (!role) {
+      return res.status(400).json({ error: "A valid standardized role is required" });
     }
 
     const updated = await prisma.roleAlignmentMapping.update({
@@ -3186,15 +3627,51 @@ app.put("/role-alignment/mappings/:id", express.json(), async (req, res) => {
         id
       },
       data: {
-        mappedRoleName: matrixRoleExists.roleName,
+        mappedRoleName: role.roleName,
+        standardizedRoleId: role.id,
         matchSource: "ADMIN_CONFIRMED"
       }
     });
 
-    return res.status(200).json({ success: true, data: updated });
+    return res.status(200).json({
+      success: true,
+      data: await prisma.roleAlignmentMapping.findUnique({
+        where: { id: updated.id },
+        include: { standardizedRole: true }
+      })
+    });
   } catch (error) {
     return res.status(500).json({
       error: error instanceof Error ? error.message : "Failed to update role mapping"
+    });
+  }
+});
+
+app.post("/role-library/mappings/reassign", express.json(), async (req, res) => {
+  try {
+    if (!ensureAdmin(req, res)) {
+      return;
+    }
+
+    const fromRoleId = typeof req.body?.fromRoleId === "string" ? req.body.fromRoleId : "";
+    const toRoleId = typeof req.body?.toRoleId === "string" ? req.body.toRoleId : "";
+
+    if (!fromRoleId || !toRoleId || fromRoleId === toRoleId) {
+      return res.status(400).json({ error: "fromRoleId and toRoleId are required and must be different" });
+    }
+
+    const reassigned = await prisma.roleAlignmentMapping.updateMany({
+      where: { standardizedRoleId: fromRoleId },
+      data: {
+        standardizedRoleId: toRoleId,
+        matchSource: "ADMIN_CONFIRMED"
+      }
+    });
+
+    return res.status(200).json({ success: true, data: { updatedCount: reassigned.count } });
+  } catch (error) {
+    return res.status(500).json({
+      error: error instanceof Error ? error.message : "Failed to reassign role mappings"
     });
   }
 });

@@ -1095,34 +1095,59 @@ enum TenureBandLabel {
 }
 
 model MarketValueMatrix {
-  id          String          @id @default(uuid())
-  roleName    String
-  tenureBand  TenureBandLabel
-  minSalary   Decimal         @db.Decimal(12, 2)
-  maxSalary   Decimal         @db.Decimal(12, 2)
-  createdAt   DateTime        @default(now())
-  updatedAt   DateTime        @updatedAt
+  id                 String            @id @default(uuid())
+  roleName           String
+  standardizedRoleId String?
+  tenureBand         TenureBandLabel
+  minSalary          Decimal           @db.Decimal(12, 2)
+  maxSalary          Decimal           @db.Decimal(12, 2)
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
+
+  standardizedRole   StandardizedRole? @relation(fields: [standardizedRoleId], references: [id], onDelete: Cascade)
 
   @@unique([roleName, tenureBand])
   @@index([roleName])
+  @@index([standardizedRoleId])
   @@index([tenureBand])
   @@map("market_value_matrix")
 }
 
 enum RoleMatchSource {
-  AUTO
+  SAVED_RULE
+  AUTO_SIMILARITY
+  NEW_ROLE_SUGGESTION
   ADMIN_CONFIRMED
 }
 
+model StandardizedRole {
+  id          String                 @id @default(uuid())
+  roleName    String                 @unique
+  isActive    Boolean                @default(true)
+  createdAt   DateTime               @default(now())
+  updatedAt   DateTime               @updatedAt
+
+  matrixRows  MarketValueMatrix[]
+  mappings    RoleAlignmentMapping[]
+
+  @@index([isActive])
+  @@map("standardized_roles")
+}
+
 model RoleAlignmentMapping {
-  id             String          @id @default(uuid())
-  sourceRoleName String          @unique
-  mappedRoleName String
-  matchSource    RoleMatchSource @default(ADMIN_CONFIRMED)
-  createdAt      DateTime        @default(now())
-  updatedAt      DateTime        @updatedAt
+  id                 String            @id @default(uuid())
+  sourceRoleName     String            @unique
+  mappedRoleName     String
+  standardizedRoleId String?
+  matchSource        RoleMatchSource   @default(ADMIN_CONFIRMED)
+  confidenceScore    Decimal?          @db.Decimal(5, 4)
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
+
+  standardizedRole   StandardizedRole? @relation(fields: [standardizedRoleId], references: [id], onDelete: Restrict)
 
   @@index([mappedRoleName])
+  @@index([standardizedRoleId])
   @@map("role_alignment_mappings")
 }
 

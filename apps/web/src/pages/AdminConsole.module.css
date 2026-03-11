@@ -345,6 +345,25 @@
   cursor: pointer;
 }
 
+.smallButton:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.dangerButton {
+  background: #b91c1c;
+}
+
+.dangerButton:hover {
+  background: #991b1b;
+}
+
+.referenceActionsCell {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .mappingSelect {
   width: 100%;
   max-width: 220px;
