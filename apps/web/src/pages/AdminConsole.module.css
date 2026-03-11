@@ -9,6 +9,35 @@
   margin: 0 auto;
 }
 
+.stack {
+  display: grid;
+  gap: 16px;
+}
+
+.tabRow {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+
+.tabButton {
+  border: 1px solid #d1d5db;
+  background: #ffffff;
+  color: #374151;
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 8px 14px;
+  cursor: pointer;
+}
+
+.tabButtonActive {
+  background: #111827;
+  color: #ffffff;
+  border-color: #111827;
+}
+
 .title {
   font-size: 28px;
   font-weight: 600;
@@ -90,6 +119,241 @@
   margin: 0;
   font-size: 13px;
   color: #6b7280;
+}
+
+.uploadRow {
+  margin-top: 14px;
+}
+
+.fileLabel {
+  display: block;
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #374151;
+}
+
+.fileInput {
+  width: 100%;
+  font-size: 13px;
+  color: #374151;
+}
+
+.helperText {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.errorText {
+  margin: 0 0 10px;
+  font-size: 13px;
+  color: #b91c1c;
+}
+
+/* ── Market Value Matrix ─────────────────────────────────── */
+
+.matrixRoleRow {
+  margin-top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 360px;
+}
+
+.matrixRoleLabel {
+  font-size: 12px;
+  font-weight: 600;
+  color: #374151;
+}
+
+.matrixRoleInput {
+  padding: 8px 12px;
+  font-size: 13px;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  color: #111827;
+  background: #fff;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.matrixRoleInput:focus {
+  border-color: #6366f1;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.12);
+}
+
+.matrixTableWrapper {
+  margin-top: 18px;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.matrixTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.matrixHead {
+  background: #f9fafb;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.matrixThBand {
+  padding: 10px 16px;
+  text-align: left;
+  font-weight: 600;
+  color: #374151;
+  width: 40%;
+}
+
+.matrixTh {
+  padding: 10px 16px;
+  text-align: left;
+  font-weight: 600;
+  color: #374151;
+}
+
+.matrixRow {
+  border-bottom: 1px solid #f3f4f6;
+}
+
+.matrixRow:last-child {
+  border-bottom: none;
+}
+
+.matrixRow:nth-child(even) {
+  background: #f9fafb;
+}
+
+.matrixTdBand {
+  padding: 10px 16px;
+  color: #374151;
+  font-weight: 500;
+}
+
+.matrixTd {
+  padding: 8px 12px;
+}
+
+.matrixInput {
+  width: 100%;
+  max-width: 160px;
+  padding: 7px 10px;
+  font-size: 13px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  color: #111827;
+  background: #fff;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.matrixInput:focus {
+  border-color: #6366f1;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.12);
+}
+
+.matrixSuccess {
+  margin: 14px 0 0;
+  font-size: 13px;
+  color: #15803d;
+  font-weight: 500;
+}
+
+.inlineActions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.referenceTableWrap {
+  margin-top: 14px;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  overflow-x: auto;
+}
+
+.referenceTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.referenceTable th,
+.referenceTable td {
+  padding: 10px 12px;
+  border-bottom: 1px solid #f3f4f6;
+  text-align: left;
+}
+
+.referenceTable thead th {
+  background: #f9fafb;
+  color: #374151;
+  font-weight: 600;
+}
+
+.alignmentGrid {
+  margin-top: 14px;
+  display: grid;
+  gap: 14px;
+}
+
+.alignmentPanel {
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  overflow-x: auto;
+}
+
+.alignmentTitle {
+  margin: 0;
+  padding: 12px;
+  font-size: 15px;
+  color: #111827;
+  border-bottom: 1px solid #f3f4f6;
+}
+
+.alignmentTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.alignmentTable th,
+.alignmentTable td {
+  padding: 10px 12px;
+  border-bottom: 1px solid #f3f4f6;
+  text-align: left;
+}
+
+.alignmentTable th {
+  background: #f9fafb;
+  color: #374151;
+  font-weight: 600;
+}
+
+.smallButton {
+  border: 0;
+  border-radius: 6px;
+  padding: 6px 10px;
+  background: #111827;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.mappingSelect {
+  width: 100%;
+  max-width: 220px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 12px;
+  color: #111827;
+  background: #ffffff;
 }
 
 @media (max-width: 640px) {

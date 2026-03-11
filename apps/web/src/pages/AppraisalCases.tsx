@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { ViewerSession } from '../utils/auth';
 import styles from './AppraisalCases.module.css';
 
@@ -19,7 +19,59 @@ interface AppraisalCasesProps {
   onViewCase: (staffId: string) => void;
 }
 
+interface CurrentCompensationRecord {
+  staffId: string;
+  currentCompensation: number | string;
+  currency: string;
+  effectiveDate: string;
+}
+
 export function AppraisalCases({ viewerSession, onViewCase }: AppraisalCasesProps) {
+  const [currentCompByStaffId, setCurrentCompByStaffId] = useState<Record<string, CurrentCompensationRecord>>({});
+
+  const employees = useMemo(() => {
+    if (!viewerSession) {
+      return [];
+    }
+
+    return viewerSession.virtual_assistants || [];
+  }, [viewerSession]);
+
+  useEffect(() => {
+    const loadCurrentCompensation = async () => {
+      if (!viewerSession || employees.length === 0) {
+        setCurrentCompByStaffId({});
+        return;
+      }
+
+      const staffIds = employees
+        .map((emp) => (emp.staff_id || emp.staffId || '').trim())
+        .filter(Boolean);
+
+      if (staffIds.length === 0) {
+        setCurrentCompByStaffId({});
+        return;
+      }
+
+      try {
+        const response = await fetch(`http://localhost:3001/compensation/current?staffIds=${encodeURIComponent(staffIds.join(','))}`);
+        const data = await response.json();
+        const items = Array.isArray(data?.items) ? data.items as CurrentCompensationRecord[] : [];
+
+        const byStaffId = items.reduce<Record<string, CurrentCompensationRecord>>((acc, item) => {
+          acc[item.staffId] = item;
+          return acc;
+        }, {});
+
+        setCurrentCompByStaffId(byStaffId);
+      } catch {
+        setCurrentCompByStaffId({});
+      }
+    };
+
+    void loadCurrentCompensation();
+  }, [viewerSession, employees]);
+
   if (!viewerSession) {
     return (
       <div className={styles.emptyStateContainer}>
@@ -89,9 +141,29 @@ export function AppraisalCases({ viewerSession, onViewCase }: AppraisalCasesProp
     return calculateTenure(emp.staff_start_date || emp.staffStartDate);
   };
 
-  const employees = viewerSession?.viewer_type === 'RM'
-    ? (viewerSession?.virtual_assistants || [])
-    : (viewerSession?.virtual_assistants || []);
+  const formatCurrentCompensation = (staffId: string): string => {
+    const record = currentCompByStaffId[staffId];
+    if (!record) {
+      return '—';
+    }
+
+    const amount = Number(record.currentCompensation);
+    if (Number.isNaN(amount)) {
+      return '—';
+    }
+
+    const currency = record.currency || 'AUD';
+    try {
+      return new Intl.NumberFormat('en-US', {
+        style: 'currency',
+        currency,
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2
+      }).format(amount);
+    } catch {
+      return `${currency} ${amount.toFixed(2)}`;
+    }
+  };
 
   return (
     <div className={styles.container}>
@@ -192,7 +264,7 @@ export function AppraisalCases({ viewerSession, onViewCase }: AppraisalCasesProp
                         {getTenure(emp)}
                       </td>
                       <td className={styles.cellRight}>
-                        —
+                        {formatCurrentCompensation(getStaffId(emp))}
                       </td>
                       <td className={styles.cellRight}>
                         —

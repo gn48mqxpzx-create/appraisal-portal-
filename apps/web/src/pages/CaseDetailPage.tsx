@@ -22,9 +22,17 @@ interface CaseDetailPageProps {
   onNavigateBack: () => void;
 }
 
+interface CurrentCompensationRecord {
+  staffId: string;
+  currentCompensation: number | string;
+  currency: string;
+  effectiveDate: string;
+}
+
 export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseDetailPageProps) {
   const [employee, setEmployee] = useState<Employee | null>(null);
   const [notes, setNotes] = useState<string>('');
+  const [currentCompensation, setCurrentCompensation] = useState<CurrentCompensationRecord | null>(null);
 
   useEffect(() => {
     // Find the employee from the viewer session
@@ -46,6 +54,20 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
       setEmployee(found || null);
     }
   }, [staffId, viewerSession]);
+
+  useEffect(() => {
+    const loadCurrentCompensation = async () => {
+      try {
+        const response = await fetch(`http://localhost:3001/compensation/current/${encodeURIComponent(staffId)}`);
+        const data = await response.json();
+        setCurrentCompensation(data?.data || null);
+      } catch {
+        setCurrentCompensation(null);
+      }
+    };
+
+    void loadCurrentCompensation();
+  }, [staffId]);
 
   const calculateTenure = (startDate: string | undefined): string => {
     if (!startDate) return '—';
@@ -83,6 +105,29 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
       });
     } catch {
       return '—';
+    }
+  };
+
+  const formatCurrency = (value: number | string | null | undefined, currency: string | null | undefined): string => {
+    if (value === null || value === undefined) {
+      return '—';
+    }
+
+    const parsed = Number(value);
+    if (Number.isNaN(parsed)) {
+      return '—';
+    }
+
+    const resolvedCurrency = currency || 'AUD';
+    try {
+      return new Intl.NumberFormat('en-US', {
+        style: 'currency',
+        currency: resolvedCurrency,
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2
+      }).format(parsed);
+    } catch {
+      return `${resolvedCurrency} ${parsed.toFixed(2)}`;
     }
   };
 
@@ -173,15 +218,13 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
             <div className={styles.compensationGrid}>
               <div className={styles.compensationField}>
                 <label className={styles.fieldLabel}>Current Compensation</label>
-                <div className={styles.fieldValue}>—</div>
+                <div className={styles.fieldValue}>
+                  {formatCurrency(currentCompensation?.currentCompensation, currentCompensation?.currency)}
+                </div>
               </div>
               <div className={styles.compensationField}>
-                <label className={styles.fieldLabel}>Proposed Adjustment</label>
-                <div className={styles.fieldValue}>—</div>
-              </div>
-              <div className={styles.compensationField}>
-                <label className={styles.fieldLabel}>New Compensation</label>
-                <div className={styles.fieldValue}>—</div>
+                <label className={styles.fieldLabel}>Effective Date</label>
+                <div className={styles.fieldValue}>{formatDate(currentCompensation?.effectiveDate)}</div>
               </div>
             </div>
           </div>
