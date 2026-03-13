@@ -16,6 +16,7 @@
     "prisma:studio": "npm run prisma:studio --workspace packages/database",
     "prisma:backfill:standardized-roles": "npm run backfill:standardized-roles --workspace packages/database",
     "seed:market-matrix": "npm run seed:market-matrix --workspace packages/database",
+    "wsll:generate-full-dummy": "node scripts/generate_wsll_full_dummy_upload.mjs",
     "docker:up": "docker compose up -d",
     "docker:down": "docker compose down"
   },

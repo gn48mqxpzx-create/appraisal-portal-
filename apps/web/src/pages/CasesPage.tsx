@@ -128,8 +128,11 @@ export function CasesPage() {
         <div className="mb-3 text-sm font-semibold text-amber-900">Temporary Viewer Identification</div>
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
           <div>
-            <label className="block text-xs font-medium text-amber-900 mb-1">Viewer Role</label>
+            <label htmlFor="viewer-role-select" className="block text-xs font-medium text-amber-900 mb-1">Viewer Role</label>
             <select
+              id="viewer-role-select"
+              aria-label="Viewer Role"
+              title="Viewer Role"
               value={viewerRole}
               onChange={(e) => {
                 setViewerRole(e.target.value);
@@ -197,8 +200,11 @@ export function CasesPage() {
 
             {/* Status Dropdown */}
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Status</label>
+              <label htmlFor="cases-status-filter" className="block text-sm font-medium text-gray-700 mb-1">Status</label>
               <select
+                id="cases-status-filter"
+                aria-label="Status"
+                title="Status"
                 value={status}
                 onChange={(e) => {
                   setStatus(e.target.value);
@@ -217,8 +223,11 @@ export function CasesPage() {
 
             {/* Staff Role Dropdown */}
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Staff Role</label>
+              <label htmlFor="cases-staff-role-filter" className="block text-sm font-medium text-gray-700 mb-1">Staff Role</label>
               <select
+                id="cases-staff-role-filter"
+                aria-label="Staff Role"
+                title="Staff Role"
                 value={staffRole}
                 onChange={(e) => {
                   setStaffRole(e.target.value);
@@ -237,8 +246,11 @@ export function CasesPage() {
 
             {/* Contact Type Dropdown */}
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Contact Type</label>
+              <label htmlFor="cases-contact-type-filter" className="block text-sm font-medium text-gray-700 mb-1">Contact Type</label>
               <select
+                id="cases-contact-type-filter"
+                aria-label="Contact Type"
+                title="Contact Type"
                 value={contactType}
                 onChange={(e) => {
                   setContactType(e.target.value);

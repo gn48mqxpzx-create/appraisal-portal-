@@ -1,299 +1,223 @@
 import { useEffect, useMemo, useState } from 'react';
 import { ViewerSession } from '../utils/auth';
+import { formatCompensation, getPhpToAudRate } from '../utils/currencyDisplay';
 import styles from './AppraisalCases.module.css';
-
-interface Employee {
-  staff_id?: string;
-  staffId?: string;
-  full_name?: string;
-  fullName?: string;
-  email?: string;
-  staff_role?: string;
-  staffRole?: string;
-  staff_start_date?: string;
-  staffStartDate?: string;
-}
 
 interface AppraisalCasesProps {
   viewerSession: ViewerSession | null;
   onViewCase: (staffId: string) => void;
 }
 
-interface CurrentCompensationRecord {
-  staffId: string;
-  currentCompensation: number | string;
-  currency: string;
-  effectiveDate: string;
+interface CaseListItem {
+  id: string;
+  staff_id: string;
+  full_name: string;
+  staff_role: string;
+  contact_type: string;
+  status: string;
+  wsll_gate_status?: 'PASS' | 'MISSING_WSLL' | 'WSLL_BELOW_THRESHOLD' | null;
+  wsll_blocker_message?: string | null;
+  final_new_base: number | null;
+  proposed_increase_amount: number | null;
 }
 
-export function AppraisalCases({ viewerSession, onViewCase }: AppraisalCasesProps) {
-  const [currentCompByStaffId, setCurrentCompByStaffId] = useState<Record<string, CurrentCompensationRecord>>({});
+const getWsllStatusDisplay = (status: CaseListItem['wsll_gate_status']) => {
+  if (status === 'PASS') {
+    return {
+      label: 'Eligible',
+      badgeClass: styles.wsllEligible
+    };
+  }
 
-  const employees = useMemo(() => {
+  if (status === 'WSLL_BELOW_THRESHOLD') {
+    return {
+      label: 'Not Eligible',
+      badgeClass: styles.wsllNotEligible
+    };
+  }
+
+  return {
+    label: 'WSLL Missing',
+    badgeClass: styles.wsllMissing
+  };
+};
+
+const getStatusLabel = (status: string) => {
+  switch (status) {
+    case 'DRAFT':
+      return 'Draft';
+    case 'SUBMITTED_FOR_REVIEW':
+      return 'Submitted';
+    case 'REVIEW_APPROVED':
+      return 'Review Approved';
+    case 'REVIEW_REJECTED':
+      return 'Review Rejected';
+    case 'PENDING_CLIENT_APPROVAL':
+      return 'Client Approval Pending';
+    case 'CLIENT_APPROVED':
+      return 'Client Approved';
+    case 'SUBMITTED_TO_PAYROLL':
+      return 'Payroll Submitted';
+    default:
+      return status.replace(/_/g, ' ');
+  }
+};
+
+export function AppraisalCases({ viewerSession, onViewCase }: AppraisalCasesProps) {
+  const [cases, setCases] = useState<CaseListItem[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const phpToAudRate = useMemo(() => getPhpToAudRate(), []);
+
+  const viewerRole = useMemo(() => {
     if (!viewerSession) {
-      return [];
+      return '';
     }
 
-    return viewerSession.virtual_assistants || [];
+    return viewerSession.role === 'Admin' ? 'ADMIN' : viewerSession.role;
   }, [viewerSession]);
 
   useEffect(() => {
-    const loadCurrentCompensation = async () => {
-      if (!viewerSession || employees.length === 0) {
-        setCurrentCompByStaffId({});
+    const loadCases = async () => {
+      if (!viewerSession || !viewerRole) {
+        setCases([]);
         return;
       }
 
-      const staffIds = employees
-        .map((emp) => (emp.staff_id || emp.staffId || '').trim())
-        .filter(Boolean);
-
-      if (staffIds.length === 0) {
-        setCurrentCompByStaffId({});
-        return;
-      }
+      setLoading(true);
+      setError(null);
 
       try {
-        const response = await fetch(`http://localhost:3001/compensation/current?staffIds=${encodeURIComponent(staffIds.join(','))}`);
-        const data = await response.json();
-        const items = Array.isArray(data?.items) ? data.items as CurrentCompensationRecord[] : [];
+        const params = new URLSearchParams({
+          viewerRole,
+          page: '1',
+          pageSize: '250'
+        });
 
-        const byStaffId = items.reduce<Record<string, CurrentCompensationRecord>>((acc, item) => {
-          acc[item.staffId] = item;
-          return acc;
-        }, {});
+        if (viewerRole !== 'ADMIN') {
+          params.set('viewerName', viewerSession.viewer_name);
+          params.set('viewerEmail', viewerSession.viewer_email);
+        }
 
-        setCurrentCompByStaffId(byStaffId);
+        const response = await fetch(`http://localhost:3001/cases?${params.toString()}`);
+        const payload = await response.json().catch(() => ({}));
+
+        if (!response.ok) {
+          setCases([]);
+          setError(payload?.error?.message || 'Failed to load cases');
+          return;
+        }
+
+        setCases(Array.isArray(payload?.data?.items) ? payload.data.items as CaseListItem[] : []);
       } catch {
-        setCurrentCompByStaffId({});
+        setCases([]);
+        setError('Failed to load cases');
+      } finally {
+        setLoading(false);
       }
     };
 
-    void loadCurrentCompensation();
-  }, [viewerSession, employees]);
+    void loadCases();
+  }, [viewerRole, viewerSession]);
 
   if (!viewerSession) {
     return (
       <div className={styles.emptyStateContainer}>
         <div className={styles.innerContainer}>
-          <h1 className={styles.title}>
-            Appraisal Cases
-          </h1>
-          <p className={styles.subtitleWithMargin}>
-            View and manage appraisal cases for employees in your scope
-          </p>
-
+          <h1 className={styles.title}>Appraisal Cases</h1>
+          <p className={styles.subtitleWithMargin}>View and manage appraisal cases for employees in your scope</p>
           <div className={styles.emptyState}>
-            <p className={styles.emptyStateText}>
-              Please log in to view your appraisal cases
-            </p>
+            <p className={styles.emptyStateText}>Please log in to view your appraisal cases</p>
           </div>
         </div>
       </div>
     );
   }
 
-  const calculateTenure = (startDate: string | undefined): string => {
-    if (!startDate) return '—';
-    try {
-      const start = new Date(startDate);
-      if (isNaN(start.getTime())) return '—';
-      const now = new Date();
-      const totalMonths = (now.getFullYear() - start.getFullYear()) * 12 + (now.getMonth() - start.getMonth());
-      
-      if (totalMonths < 0) return '—';
-      if (totalMonths === 0) return '0m';
-      
-      const years = Math.floor(totalMonths / 12);
-      const months = totalMonths % 12;
-      
-      if (years === 0) {
-        return `${months}m`;
-      } else if (months === 0) {
-        return `${years}y`;
-      } else {
-        return `${years}y ${months}m`;
-      }
-    } catch {
-      return '—';
-    }
-  };
-
-  const getStaffId = (emp: Employee): string => emp.staff_id || emp.staffId || '—';
-  const getFullName = (emp: Employee): string => emp.full_name || emp.fullName || '—';
-  const getEmail = (emp: Employee): string => emp.email || '—';
-  const getStaffRole = (emp: Employee): string => emp.staff_role || emp.staffRole || '—';
-  const getStartDate = (emp: Employee): string => {
-    const startDate = emp.staff_start_date || emp.staffStartDate;
-    if (!startDate) return '—';
-    try {
-      return new Date(startDate).toLocaleDateString('en-US', {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric'
-      });
-    } catch {
-      return '—';
-    }
-  };
-
-  const getTenure = (emp: Employee): string => {
-    return calculateTenure(emp.staff_start_date || emp.staffStartDate);
-  };
-
-  const formatCurrentCompensation = (staffId: string): string => {
-    const record = currentCompByStaffId[staffId];
-    if (!record) {
-      return '—';
-    }
-
-    const amount = Number(record.currentCompensation);
-    if (Number.isNaN(amount)) {
-      return '—';
-    }
-
-    const currency = record.currency || 'AUD';
-    try {
-      return new Intl.NumberFormat('en-US', {
-        style: 'currency',
-        currency,
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2
-      }).format(amount);
-    } catch {
-      return `${currency} ${amount.toFixed(2)}`;
-    }
-  };
-
   return (
     <div className={styles.container}>
       <div className={styles.innerContainer}>
-        {/* Header */}
         <div className={styles.header}>
-          <h1 className={styles.title}>
-            Appraisal Cases
-          </h1>
-          <p className={styles.subtitle}>
-            View and manage appraisal cases for employees in your scope
-          </p>
+          <h1 className={styles.title}>Appraisal Cases</h1>
+          <p className={styles.subtitle}>View and manage appraisal cases for employees in your scope</p>
         </div>
 
-        {/* Viewer Summary */}
-        {viewerSession && (
-        <>
         <div className={styles.viewerSummary}>
           <p className={styles.viewerSummaryText}>
             <strong>{viewerSession.viewer_name}</strong> ({viewerSession.role})
             {' • '}
-            {viewerSession.scope_summary.total_va_count} appraisals
+            {cases.length} persisted cases
           </p>
         </div>
 
-        {/* Cases Table */}
         <div className={styles.tableWrapper}>
           <div className={styles.tableScroll}>
             <table className={styles.table}>
               <thead>
                 <tr className={styles.tableHeader}>
-                  <th className={styles.tableHeaderCell}>
-                    Staff ID
-                  </th>
-                  <th className={styles.tableHeaderCell}>
-                    Full Name
-                  </th>
-                  <th className={styles.tableHeaderCell}>
-                    Email
-                  </th>
-                  <th className={styles.tableHeaderCell}>
-                    Role
-                  </th>
-                  <th className={styles.tableHeaderCellCenter}>
-                    Start Date
-                  </th>
-                  <th className={styles.tableHeaderCellCenter}>
-                    Tenure
-                  </th>
-                  <th className={styles.tableHeaderCellRight}>
-                    Current Comp
-                  </th>
-                  <th className={styles.tableHeaderCellRight}>
-                    Proposed Adj
-                  </th>
-                  <th className={styles.tableHeaderCellRight}>
-                    New Comp
-                  </th>
-                  <th className={styles.tableHeaderCellCenter}>
-                    Status
-                  </th>
-                  <th className={styles.tableHeaderCellCenter}>
-                    Action
-                  </th>
+                  <th className={styles.tableHeaderCell}>Staff ID</th>
+                  <th className={styles.tableHeaderCell}>Full Name</th>
+                  <th className={styles.tableHeaderCell}>Role</th>
+                  <th className={styles.tableHeaderCell}>Contact Type</th>
+                  <th className={styles.tableHeaderCellCenter}>WSLL Status</th>
+                  <th className={styles.tableHeaderCellRight}>Proposed Adj</th>
+                  <th className={styles.tableHeaderCellRight}>New Comp</th>
+                  <th className={styles.tableHeaderCellCenter}>Status</th>
+                  <th className={styles.tableHeaderCellCenter}>Action</th>
                 </tr>
               </thead>
               <tbody>
-                {employees.length === 0 ? (
+                {loading ? (
                   <tr>
-                    <td colSpan={11} className={styles.emptyRow}>
-                      No cases to display
-                    </td>
+                    <td colSpan={9} className={styles.emptyRow}>Loading cases...</td>
+                  </tr>
+                ) : error ? (
+                  <tr>
+                    <td colSpan={9} className={styles.emptyRow}>{error}</td>
+                  </tr>
+                ) : cases.length === 0 ? (
+                  <tr>
+                    <td colSpan={9} className={styles.emptyRow}>No cases to display</td>
                   </tr>
                 ) : (
-                  employees.map((emp, idx) => (
-                    <tr
-                      key={idx}
-                      className={`${styles.tableRow} ${idx % 2 === 0 ? styles.tableRowEven : styles.tableRowOdd} ${idx < employees.length - 1 ? styles.tableRowNotLast : ''}`}
-                    >
-                      <td className={styles.cellDefault}>
-                        <code className={styles.cellCode}>
-                          {getStaffId(emp)}
-                        </code>
-                      </td>
-                      <td className={styles.cellDefault}>
-                        {getFullName(emp)}
-                      </td>
-                      <td className={styles.cellEmail}>
-                        {getEmail(emp)}
-                      </td>
-                      <td className={styles.cellDefault}>
-                        {getStaffRole(emp)}
-                      </td>
-                      <td className={styles.cellCenter}>
-                        {getStartDate(emp)}
-                      </td>
-                      <td className={styles.cellCenterBold}>
-                        {getTenure(emp)}
-                      </td>
-                      <td className={styles.cellRight}>
-                        {formatCurrentCompensation(getStaffId(emp))}
-                      </td>
-                      <td className={styles.cellRight}>
-                        —
-                      </td>
-                      <td className={styles.cellRight}>
-                        —
-                      </td>
-                      <td className={styles.cellCenter}>
-                        <span className={styles.statusBadge}>
-                          Not Started
-                        </span>
-                      </td>
-                      <td className={styles.cellCenter}>
-                        <button 
-                          className={styles.actionButton}
-                          onClick={() => onViewCase(getStaffId(emp))}
-                        >
-                          View Case
-                        </button>
-                      </td>
-                    </tr>
-                  ))
+                  cases.map((caseItem, idx) => {
+                    const wsllStatus = getWsllStatusDisplay(caseItem.wsll_gate_status);
+
+                    return (
+                      <tr
+                        key={caseItem.id}
+                        className={`${styles.tableRow} ${idx % 2 === 0 ? styles.tableRowEven : styles.tableRowOdd} ${idx < cases.length - 1 ? styles.tableRowNotLast : ''}`}
+                      >
+                        <td className={styles.cellDefault}>
+                          <code className={styles.cellCode}>{caseItem.staff_id}</code>
+                        </td>
+                        <td className={styles.cellDefault}>{caseItem.full_name}</td>
+                        <td className={styles.cellDefault}>{caseItem.staff_role}</td>
+                        <td className={styles.cellDefault}>{caseItem.contact_type}</td>
+                        <td className={styles.cellCenter}>
+                          <span className={`${styles.wsllBadge} ${wsllStatus.badgeClass}`}>{wsllStatus.label}</span>
+                          {caseItem.wsll_gate_status !== 'PASS' ? (
+                            <div className={styles.wsllReason}>{caseItem.wsll_blocker_message || 'Recommendation unavailable until WSLL is eligible.'}</div>
+                          ) : null}
+                        </td>
+                        <td className={styles.cellRight}>{formatCompensation(caseItem.proposed_increase_amount, { view: 'appraisal-cases', caseStatus: caseItem.status, conversionRate: phpToAudRate })}</td>
+                        <td className={styles.cellRight}>{formatCompensation(caseItem.final_new_base, { view: 'appraisal-cases', caseStatus: caseItem.status, conversionRate: phpToAudRate })}</td>
+                        <td className={styles.cellCenter}>
+                          <span className={styles.statusBadge}>{getStatusLabel(caseItem.status)}</span>
+                        </td>
+                        <td className={styles.cellCenter}>
+                          <button className={styles.actionButton} onClick={() => onViewCase(caseItem.staff_id)}>
+                            View Case
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })
                 )}
               </tbody>
             </table>
           </div>
         </div>
-        </>
-        )}
       </div>
     </div>
   );

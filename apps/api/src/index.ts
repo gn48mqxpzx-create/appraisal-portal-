@@ -26,6 +26,16 @@ import {
   parseFlexibleDateToIso,
   type WsllFlagCode
 } from "./intake/csvNormalize";
+import {
+  getCaseWorkflowByStaffId,
+  getReviewQueue,
+  reviewRecommendation,
+  submitCaseToPayroll,
+  submitRecommendationForReview
+} from "./services/recommendationReviewService";
+import { ALLOWED_APPRAISAL_CONTACT_TYPES, getScopedCaseWhere, getScopedEmployees } from "./services/employeeScopeService";
+import { getLatestWsllEligibilityByStaffIds } from "./services/wsllEligibilityService";
+import { getSMDirectory, resolveManagerNamesForCases } from "./services/employeeDirectoryService";
 
 const app = express();
 const port = Number(process.env.API_PORT ?? 3001);
@@ -33,6 +43,73 @@ const upload = multer({ storage: multer.memoryStorage() });
 const ADMIN_EMAIL = "uly@vaplatinum.com.au";
 
 const reportPathByBatchId = (batchId: string) => `/intake/upload/${batchId}/questionable-rows.csv`;
+
+type WsllQuarterScores = {
+  q1_wsll: number | null;
+  q2_wsll: number | null;
+  q3_wsll: number | null;
+  q4_wsll: number | null;
+};
+
+const toNullableNumber = (value: unknown): number | null => {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Number(value.toFixed(2));
+  }
+
+  if (typeof value === "string") {
+    const normalized = value.trim();
+    if (!normalized) {
+      return null;
+    }
+
+    const parsed = Number(normalized);
+    if (Number.isFinite(parsed)) {
+      return Number(parsed.toFixed(2));
+    }
+  }
+
+  return null;
+};
+
+const getQuarterScoresFromRawRow = (rawRow: Prisma.JsonValue | null): WsllQuarterScores => {
+  if (!rawRow || typeof rawRow !== "object" || Array.isArray(rawRow)) {
+    return {
+      q1_wsll: null,
+      q2_wsll: null,
+      q3_wsll: null,
+      q4_wsll: null
+    };
+  }
+
+  const row = rawRow as Record<string, unknown>;
+  return {
+    q1_wsll: toNullableNumber(row.q1Wsll ?? row.q1_wsll ?? row.q1),
+    q2_wsll: toNullableNumber(row.q2Wsll ?? row.q2_wsll ?? row.q2),
+    q3_wsll: toNullableNumber(row.q3Wsll ?? row.q3_wsll ?? row.q3),
+    q4_wsll: toNullableNumber(row.q4Wsll ?? row.q4_wsll ?? row.q4)
+  };
+};
+
+const getUploadSessionMeta = (
+  rawRow: Prisma.JsonValue | null
+): { uploadSessionId: string | null; uploadFileName: string | null } => {
+  if (!rawRow || typeof rawRow !== "object" || Array.isArray(rawRow)) {
+    return {
+      uploadSessionId: null,
+      uploadFileName: null
+    };
+  }
+
+  const row = rawRow as Record<string, unknown>;
+  return {
+    uploadSessionId: typeof row.uploadSessionId === "string" && row.uploadSessionId.trim()
+      ? row.uploadSessionId.trim()
+      : null,
+    uploadFileName: typeof row.uploadFileName === "string" && row.uploadFileName.trim()
+      ? row.uploadFileName.trim()
+      : null
+  };
+};
 
 type BenchmarkStatus =
   | "READY"
@@ -628,21 +705,85 @@ app.post("/cycles/ensure-active", async (_req, res) => {
   }
 });
 
-const getDashboardSummary = async (_req: Request, res: Response) => {
+const DASHBOARD_APPROVED_STATUSES = [
+  "REVIEW_APPROVED",
+  "PENDING_CLIENT_APPROVAL",
+  "CLIENT_APPROVED",
+  "SUBMITTED_TO_PAYROLL",
+  "PAYROLL_PENDING",
+  "PAYROLL_PROCESSED",
+  "RELEASED_TO_PAYROLL"
+];
+
+const DASHBOARD_REJECTED_STATUSES = ["REVIEW_REJECTED"];
+
+const getDashboardSummary = async (req: Request, res: Response) => {
   try {
     const activeCycle = await ensureActiveCycle();
+    const viewer = getViewer(req);
+    if (!viewer) {
+      return res.status(400).json({
+        success: false,
+        error: {
+          message: "Missing required query parameters: viewerRole and viewer identity (viewerEmail, viewerId, or viewerName for scoped roles)"
+        }
+      });
+    }
 
-    const inScopeEmployees = await prisma.appraisalCase.count({
-      where: {
-        cycleId: activeCycle.id,
-        isRemoved: false
+    const scopedWhere = await getScopedCaseWhere(viewer, {
+      cycleId: activeCycle.id,
+      includeRemoved: false
+    });
+
+    if (!scopedWhere) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          eligible: 0,
+          draft: 0,
+          submitted: 0,
+          forReview: 0,
+          approved: 0,
+          rejected: 0,
+          activeCycleId: activeCycle.id
+        }
+      });
+    }
+
+    const scopedCases = await prisma.appraisalCase.findMany({
+      where: scopedWhere,
+      select: {
+        staffId: true,
+        status: true
       }
     });
+
+    const staffIds = [...new Set(scopedCases.map((item) => item.staffId))];
+
+    const latestWsllByStaff = await getLatestWsllEligibilityByStaffIds(staffIds);
+    const eligibleStaffIds = staffIds.filter((staffId) => latestWsllByStaff.get(staffId)?.isEligibleForAppraisal === true);
+
+    const submittedStatuses = new Set([
+      "SUBMITTED_FOR_REVIEW",
+      ...DASHBOARD_APPROVED_STATUSES,
+      ...DASHBOARD_REJECTED_STATUSES
+    ]);
+
+    const draft = scopedCases.filter((item) => item.status === "DRAFT").length;
+    const forReview = scopedCases.filter((item) => item.status === "SUBMITTED_FOR_REVIEW").length;
+    const approved = scopedCases.filter((item) => DASHBOARD_APPROVED_STATUSES.includes(item.status)).length;
+    const rejected = scopedCases.filter((item) => DASHBOARD_REJECTED_STATUSES.includes(item.status)).length;
+    const submitted = scopedCases.filter((item) => submittedStatuses.has(item.status)).length;
 
     return res.status(200).json({
       success: true,
       data: {
-        inScopeEmployees,
+        eligible: eligibleStaffIds.length,
+        draft,
+        submitted,
+        forReview,
+        approved,
+        rejected,
         activeCycleId: activeCycle.id
       }
     });
@@ -817,70 +958,45 @@ const normalizeName = (name: string | null | undefined): string => {
 };
 
 // Helper: Extract viewer identification from req.user or query params
-const getViewer = (req: Request): { name: string; role: string } | null => {
+const getViewer = (req: Request): { name: string; role: string; email: string; id: string } | null => {
   // Priority 1: req.user (from future auth implementation)
-  if ((req as any).user?.fullName && (req as any).user?.role) {
+  if ((req as any).user?.role) {
     return {
-      name: (req as any).user.fullName,
-      role: (req as any).user.role
+      name: ((req as any).user.fullName || "").trim(),
+      role: String((req as any).user.role).trim().toUpperCase(),
+      email: ((req as any).user.email || "").trim().toLowerCase(),
+      id: ((req as any).user.id || "").trim()
     };
   }
 
   // Priority 2: Query params (temporary)
   const viewerName = (req.query.viewerName as string)?.trim();
+  const viewerEmail = ((req.query.viewerEmail as string) || "").trim().toLowerCase();
+  const viewerId = ((req.query.viewerId as string) || "").trim();
   const viewerRole = (req.query.viewerRole as string)?.trim().toUpperCase();
 
   if (!viewerRole) {
     return null;
   }
 
-  const allowedRoles = ["ADMIN", "SM", "RM"];
+  const allowedRoles = ["ADMIN", "SITE_LEAD", "SM", "SUCCESS_MANAGER", "RM", "REVIEWER"];
   if (!allowedRoles.includes(viewerRole)) {
     return null;
   }
 
-  // For SM and RM, viewerName is required
-  if ((viewerRole === "SM" || viewerRole === "RM") && !viewerName) {
+  const hasScopedIdentity = Boolean(viewerName || viewerEmail || viewerId);
+
+  // For scoped roles, at least one identity field is required
+  if ((viewerRole === "SM" || viewerRole === "SUCCESS_MANAGER" || viewerRole === "RM" || viewerRole === "REVIEWER") && !hasScopedIdentity) {
     return null;
   }
 
-  return { name: viewerName || "", role: viewerRole };
-};
-
-// Helper: Build access control where clause based on viewer role
-const buildAccessWhereClause = (viewer: { name: string; role: string }): any => {
-  if (viewer.role === "ADMIN") {
-    // Admins see all cases
-    return {};
-  }
-
-  const normalizedViewerName = normalizeName(viewer.name);
-
-  if (viewer.role === "SM") {
-    // Success Managers see only cases where they are the success manager
-    // Match using raw SQL since Prisma doesn't support case-insensitive normalized comparison
-    // We'll need to filter in-memory or use raw query
-    // For now, use a workaround with case-insensitive contains
-    return {
-      successManagerStaffId: {
-        mode: "insensitive" as any,
-        equals: viewer.name
-      }
-    };
-  }
-
-  if (viewer.role === "RM") {
-    // Relationship Managers see cases where they are the relationship manager
-    return {
-      relationshipManagerStaffId: {
-        mode: "insensitive" as any,
-        equals: viewer.name
-      }
-    };
-  }
-
-  // Default: no access
-  return { id: { equals: "no-access" } };
+  return {
+    name: viewerName || "",
+    role: viewerRole,
+    email: viewerEmail,
+    id: viewerId
+  };
 };
 
 // GET /cases - List cases with pagination, filtering, and access control
@@ -894,7 +1010,7 @@ app.get("/cases", async (req: Request, res: Response) => {
       return res.status(400).json({
         success: false,
         error: {
-          message: "Missing required query parameters: viewerRole (ADMIN, SM, RM) and viewerName (for SM/RM)"
+          message: "Missing required query parameters: viewerRole and viewer identity (viewerEmail, viewerId, or viewerName for scoped roles)"
         }
       });
     }
@@ -902,8 +1018,6 @@ app.get("/cases", async (req: Request, res: Response) => {
     // Pagination parameters (safe defaults)
     const page = Math.max(1, parseInt(req.query.page as string) || 1);
     const pageSize = Math.max(1, Math.min(100, parseInt(req.query.pageSize as string) || 20));
-    const skip = (page - 1) * pageSize;
-
     // Filter parameters
     const status = (req.query.status as string)?.trim();
     const search = (req.query.search as string)?.trim();
@@ -911,107 +1025,47 @@ app.get("/cases", async (req: Request, res: Response) => {
     const contactType = (req.query.contactType as string)?.trim();
     const includeRemoved = req.query.includeRemoved === "true";
 
-    // Build where clause
-    const whereClause: any = {
-      cycleId: activeCycle.id
-    };
-
-    // Add removal filter
-    if (!includeRemoved) {
-      whereClause.isRemoved = false;
-    }
-
-    // Add access control filter
-    const accessClause = buildAccessWhereClause(viewer);
-    Object.assign(whereClause, accessClause);
-
-    // Add status filter
-    if (status) {
-      whereClause.status = status;
-    }
-
-    // Add staff role filter
-    if (staffRole) {
-      whereClause.staffRole = { contains: staffRole, mode: "insensitive" };
-    }
-
-    // Add contact type filter
-    if (contactType) {
-      whereClause.contactType = { contains: contactType, mode: "insensitive" };
-    }
-
-    // Add search filter (staff_id or full_name)
-    if (search) {
-      whereClause.OR = [
-        { staffId: { contains: search, mode: "insensitive" } },
-        { fullName: { contains: search, mode: "insensitive" } }
-      ];
-    }
-
-    // Fetch all cases matching where clause (for name normalization filtering)
-    let allCases = await prisma.appraisalCase.findMany({
-      where: whereClause,
-      select: {
-        id: true,
-        staffId: true,
-        fullName: true,
-        staffRole: true,
-        contactType: true,
-        successManagerStaffId: true,
-        relationshipManagerStaffId: true,
-        status: true,
-        createdAt: true,
-        updatedAt: true,
-        closeDate: true,
-        compCurrent: {
-          select: {
-            baseSalary: true
-          }
-        },
-        marketSnapshot: {
-          select: {
-            wsllGateStatus: true
-          }
-        },
-        recommendation: {
-          select: {
-            recommendedNewBase: true
-          }
-        },
-        override: {
-          select: {
-            overrideAmount: true,
-            overridePercent: true,
-            overrideNewBase: true
-          }
-        }
-      },
-      orderBy: [
-        { updatedAt: "desc" },
-        { fullName: "asc" }
-      ]
+    const { items: cases, total } = await getScopedEmployees(viewer, {
+      cycleId: activeCycle.id,
+      includeRemoved,
+      status,
+      search,
+      staffRole,
+      contactType,
+      page,
+      pageSize
     });
 
-    // Apply normalized name filtering for SM/RM if needed
-    if (viewer.role === "SM" || viewer.role === "RM") {
-      const normalizedViewerName = normalizeName(viewer.name);
-      allCases = allCases.filter((c) => {
-        const managerName = viewer.role === "SM" 
-          ? c.successManagerStaffId 
-          : c.relationshipManagerStaffId;
-        return normalizeName(managerName) === normalizedViewerName;
-      });
-    }
+    const latestWsllByStaff = await getLatestWsllEligibilityByStaffIds(cases.map((c) => c.staffId));
 
-    // Get total count after filtering
-    const total = allCases.length;
-
-    // Apply pagination
-    const cases = allCases.slice(skip, skip + pageSize);
+    // Batch-resolve SM and RM display names using fallback chain
+    const managerNamesMap = await resolveManagerNamesForCases(
+      cases.map((c) => ({
+        staffId: c.staffId,
+        directSmValue: c.successManagerStaffId,
+        directRmValue: c.relationshipManagerStaffId
+      }))
+    );
 
     const items = cases.map((c) => {
       const currentBase = Number(c.compCurrent?.baseSalary || 0);
-      let finalNewBase = Number(c.recommendation?.recommendedNewBase || currentBase);
+      const submittedTargetSalary =
+        c.recommendation?.submittedTargetSalary !== null && c.recommendation?.submittedTargetSalary !== undefined
+          ? Number(c.recommendation.submittedTargetSalary)
+          : null;
+      const finalTargetSalary =
+        c.recommendation?.finalTargetSalary !== null && c.recommendation?.finalTargetSalary !== undefined
+          ? Number(c.recommendation.finalTargetSalary)
+          : null;
+      const submittedIncreaseAmount =
+        c.recommendation?.submittedIncreaseAmount !== null && c.recommendation?.submittedIncreaseAmount !== undefined
+          ? Number(c.recommendation.submittedIncreaseAmount)
+          : null;
+      const finalIncreaseAmount =
+        c.recommendation?.finalIncreaseAmount !== null && c.recommendation?.finalIncreaseAmount !== undefined
+          ? Number(c.recommendation.finalIncreaseAmount)
+          : null;
+      let finalNewBase = finalTargetSalary ?? submittedTargetSalary ?? Number(c.recommendation?.recommendedNewBase || currentBase);
 
       // Apply override with precedence:
       // 1) overrideNewBase (highest priority)
@@ -1027,19 +1081,30 @@ app.get("/cases", async (req: Request, res: Response) => {
         }
       }
 
+      const wsllEligibility = latestWsllByStaff.get(c.staffId) ?? {
+        status: "MISSING_WSLL",
+        averageWsll: null,
+        blockerMessage: "WSLL data is required before a recommendation can be created."
+      };
+
+      const resolvedManagers = managerNamesMap.get(c.staffId);
+
       return {
         id: c.id,
         staff_id: c.staffId,
         full_name: c.fullName,
         staff_role: c.staffRole,
         contact_type: c.contactType,
-        success_manager: c.successManagerStaffId,
-        relationship_manager: c.relationshipManagerStaffId,
+        success_manager: resolvedManagers?.smName ?? null,
+        relationship_manager: resolvedManagers?.rmName ?? null,
         status: c.status,
         created_at: c.createdAt,
         updated_at: c.updatedAt,
         closed_at: c.closeDate,
-        wsll_gate_status: c.marketSnapshot?.wsllGateStatus || null,
+        wsll_gate_status: wsllEligibility.status,
+        wsll_average: wsllEligibility.averageWsll,
+        wsll_blocker_message: wsllEligibility.blockerMessage,
+        proposed_increase_amount: finalIncreaseAmount ?? submittedIncreaseAmount,
         final_new_base: finalNewBase
       };
     });
@@ -1059,6 +1124,49 @@ app.get("/cases", async (req: Request, res: Response) => {
       error: {
         message: error instanceof Error ? error.message : "Failed to fetch cases"
       }
+    });
+  }
+});
+
+app.get("/cases/by-staff/:staffId/workflow", async (req: Request, res: Response) => {
+  try {
+    const staffId = normalizeCsvStaffId(req.params.staffId ?? "");
+    if (!staffId) {
+      return res.status(400).json({
+        success: false,
+        error: { message: "staffId is required" }
+      });
+    }
+
+    const data = await getCaseWorkflowByStaffId(staffId);
+
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: { message: error instanceof Error ? error.message : "Failed to fetch case workflow" }
+    });
+  }
+});
+
+app.get("/review-queue", async (req: Request, res: Response) => {
+  try {
+    const viewer = getViewer(req);
+    if (!viewer) {
+      return res.status(400).json({
+        success: false,
+        error: {
+          message: "Missing required query parameters: viewerRole (ADMIN, SM, RM) and viewerName (for SM/RM)"
+        }
+      });
+    }
+
+    const items = await getReviewQueue(viewer);
+    return res.status(200).json({ success: true, data: items });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: { message: error instanceof Error ? error.message : "Failed to fetch review queue" }
     });
   }
 });
@@ -1316,14 +1424,24 @@ app.get("/cases/:id", async (req: Request, res: Response) => {
       }
     }
 
+    // Resolve SM and RM display names using fallback chain
+    const managerNames = await resolveManagerNamesForCases([
+      {
+        staffId: appraisalCase.staffId,
+        directSmValue: appraisalCase.successManagerStaffId,
+        directRmValue: appraisalCase.relationshipManagerStaffId
+      }
+    ]);
+    const resolvedManagers = managerNames.get(appraisalCase.staffId);
+
     const caseData = {
       id: appraisalCase.id,
       staff_id: appraisalCase.staffId,
       full_name: appraisalCase.fullName,
       staff_role: appraisalCase.staffRole,
       contact_type: appraisalCase.contactType,
-      success_manager: appraisalCase.successManagerStaffId,
-      relationship_manager: appraisalCase.relationshipManagerStaffId,
+      success_manager: resolvedManagers?.smName ?? null,
+      relationship_manager: resolvedManagers?.rmName ?? null,
       status: appraisalCase.status,
       created_at: appraisalCase.createdAt,
       updated_at: appraisalCase.updatedAt,
@@ -1666,6 +1784,7 @@ app.post("/wsll/upload", upload.single("file"), async (req, res) => {
       trim: true,
       bom: true
     }) as Array<Record<string, string>>;
+    const uploadSessionId = globalThis.crypto.randomUUID();
 
     if (rows.length === 0) {
       return res.status(200).json({
@@ -1679,55 +1798,120 @@ app.post("/wsll/upload", upload.single("file"), async (req, res) => {
       });
     }
 
-    const headers = Object.keys(rows[0]);
-    const headerMap = buildHeaderMap(headers);
+    const getValue = (row: Record<string, string>, keys: string[]) => {
+      for (const key of keys) {
+        if (row[key] !== undefined) {
+          return String(row[key]).trim();
+        }
+      }
+      return "";
+    };
 
-    const blockingFlags = new Set<WsllFlagCode>([
-      "MISSING_STAFF_ID",
-      "INVALID_WSLL_SCORE",
-      "WSLL_SCORE_OUT_OF_RANGE",
-      "INVALID_WSLL_DATE_FORMAT"
-    ]);
+    const parseQuarterScore = (raw: string): number | null => {
+      const normalized = raw.trim();
+      if (!normalized) {
+        return null;
+      }
+
+      const score = Number(normalized);
+      if (!Number.isFinite(score)) {
+        return null;
+      }
+
+      if (score < 0 || score > 5) {
+        return null;
+      }
+
+      return Number(score.toFixed(2));
+    };
 
     const questionableRows: Array<{
       row_number: number;
       raw_values: Record<string, string>;
-      flags: WsllFlagCode[];
+      flags: string[];
     }> = [];
 
     let imported = 0;
 
     for (let index = 0; index < rows.length; index += 1) {
       const rowNumber = index + 2;
-      const normalized = normalizeWsllRow(rows[index], rowNumber, headerMap);
-      const flags: WsllFlagCode[] = [...normalized.flags];
+      const row = rows[index];
+      const staffId = normalizeCsvStaffId(getValue(row, ["Staff ID", "staff_id", "staffId"]));
+      const fullName = getValue(row, ["Full Name", "full_name", "fullName"]);
+      const q1 = parseQuarterScore(getValue(row, ["Q1 WSLL", "q1_wsll", "Q1"]));
+      const q2 = parseQuarterScore(getValue(row, ["Q2 WSLL", "q2_wsll", "Q2"]));
+      const q3 = parseQuarterScore(getValue(row, ["Q3 WSLL", "q3_wsll", "Q3"]));
+      const q4 = parseQuarterScore(getValue(row, ["Q4 WSLL", "q4_wsll", "Q4"]));
 
-      const hasBlockingFlag = flags.some((flag) => blockingFlags.has(flag));
+      const flags: string[] = [];
 
-      if (!hasBlockingFlag) {
-        const hubspotContact = await getIdentityContactByStaffId(normalized.staff_id);
-        if (!hubspotContact) {
-          flags.push("MISSING_IN_HUBSPOT");
-        }
+      if (!staffId) {
+        flags.push("MISSING_STAFF_ID");
+      }
+      if (!fullName) {
+        flags.push("MISSING_FULL_NAME");
+      }
+      if (q1 === null) {
+        flags.push("INVALID_Q1_WSLL");
+      }
+      if (q2 === null) {
+        flags.push("INVALID_Q2_WSLL");
+      }
+      if (q3 === null) {
+        flags.push("INVALID_Q3_WSLL");
+      }
+      if (q4 === null) {
+        flags.push("INVALID_Q4_WSLL");
+      }
+
+      const employee = staffId
+        ? await prisma.appraisalCase.findFirst({
+            where: {
+              staffId,
+              contactType: { in: [...ALLOWED_APPRAISAL_CONTACT_TYPES] },
+              isRemoved: false
+            },
+            orderBy: { updatedAt: "desc" },
+            select: { staffId: true }
+          })
+        : null;
+
+      if (staffId && !employee) {
+        flags.push("MISSING_IN_SCOPE_EMPLOYEES");
       }
 
       if (flags.length > 0) {
         questionableRows.push({
           row_number: rowNumber,
-          raw_values: normalized.raw,
+          raw_values: row,
           flags
         });
         continue;
       }
 
+      const quarterScores = [q1 as number, q2 as number, q3 as number, q4 as number];
+      const averageWsll = Number((quarterScores.reduce((sum, value) => sum + value, 0) / 4).toFixed(2));
+      const isEligibleForAppraisal = averageWsll >= 2.8;
+
       await prisma.wsllRecord.create({
         data: {
-          staffId: normalized.staff_id,
-          wsllScore: normalized.wsll_score as number,
-          wsllDate: normalized.wsll_date ? new Date(`${normalized.wsll_date}T00:00:00.000Z`) : null,
+          staffId,
+          wsllScore: averageWsll,
+          wsllDate: null,
           source: WsllRecordSource.CSV,
           uploadedBy,
-          rawRowJson: normalized.raw,
+          rawRowJson: {
+            staffId,
+            fullName,
+            q1Wsll: q1,
+            q2Wsll: q2,
+            q3Wsll: q3,
+            q4Wsll: q4,
+            averageWsll,
+            isEligibleForAppraisal,
+            uploadSessionId,
+            uploadFileName: req.file.originalname
+          },
           flags: null
         }
       });
@@ -1741,6 +1925,11 @@ app.post("/wsll/upload", upload.single("file"), async (req, res) => {
         total_rows: rows.length,
         imported,
         flagged: questionableRows.length,
+        upload_session_id: uploadSessionId,
+        calculation: {
+          averageWsllFormula: "(Q1 + Q2 + Q3 + Q4) / 4",
+          eligibleThreshold: ">= 2.8"
+        },
         questionableRows
       }
     });
@@ -1756,6 +1945,257 @@ app.post("/wsll/upload", upload.single("file"), async (req, res) => {
     return res.status(500).json({
       success: false,
       error: { message: errorMessage }
+    });
+  }
+});
+
+app.get("/wsll/table/sm/:smOwnerId", async (req, res) => {
+  try {
+    const smOwnerId = decodeURIComponent(req.params.smOwnerId ?? "").trim();
+    if (!smOwnerId) {
+      return res.status(400).json({
+        success: false,
+        error: { message: "smOwnerId is required" }
+      });
+    }
+
+    const virtualAssistants = await getSMDirectory(smOwnerId);
+    const normalizedStaffIds = [
+      ...new Set(
+        virtualAssistants
+          .map((va) => normalizeCsvStaffId(va.staff_id))
+          .filter((staffId): staffId is string => Boolean(staffId))
+      )
+    ];
+
+    const wsllRecords = normalizedStaffIds.length > 0
+      ? await prisma.wsllRecord.findMany({
+          where: {
+            staffId: { in: normalizedStaffIds }
+          },
+          orderBy: [{ uploadedAt: "desc" }, { createdAt: "desc" }]
+        })
+      : [];
+
+    const latestByStaffId = new Map<string, (typeof wsllRecords)[number]>();
+    for (const record of wsllRecords) {
+      if (!latestByStaffId.has(record.staffId)) {
+        latestByStaffId.set(record.staffId, record);
+      }
+    }
+
+    const rows = virtualAssistants.map((va) => {
+      const normalizedStaffId = normalizeCsvStaffId(va.staff_id);
+      const latestRecord = normalizedStaffId ? latestByStaffId.get(normalizedStaffId) : null;
+      const quarterScores = getQuarterScoresFromRawRow(latestRecord?.rawRowJson ?? null);
+
+      return {
+        ...va,
+        q1_wsll: quarterScores.q1_wsll,
+        q2_wsll: quarterScores.q2_wsll,
+        q3_wsll: quarterScores.q3_wsll,
+        q4_wsll: quarterScores.q4_wsll,
+        wsll_uploaded_at: latestRecord?.uploadedAt ?? null
+      };
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        sm_owner_id: smOwnerId,
+        total_va_count: rows.length,
+        rows
+      }
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: { message: error instanceof Error ? error.message : "Failed to load WSLL table" }
+    });
+  }
+});
+
+app.get("/wsll/table", async (req, res) => {
+  try {
+    const viewer = getViewer(req);
+    if (!viewer) {
+      return res.status(400).json({
+        success: false,
+        error: {
+          message: "Missing required query parameters: viewerRole and viewer identity (viewerEmail, viewerId, or viewerName for scoped roles)"
+        }
+      });
+    }
+
+    const activeCycle = await ensureActiveCycle();
+    const pageSize = 500;
+    let page = 1;
+    let total = 0;
+    const scopedEmployees: Awaited<ReturnType<typeof getScopedEmployees>>["items"] = [];
+
+    do {
+      const scopedResult = await getScopedEmployees(viewer, {
+        cycleId: activeCycle.id,
+        includeRemoved: false,
+        page,
+        pageSize
+      });
+
+      total = scopedResult.total;
+      scopedEmployees.push(...scopedResult.items);
+      page += 1;
+    } while (scopedEmployees.length < total && scopedEmployees.length > 0);
+
+    const latestScopedEmployeeByStaffId = new Map<string, (typeof scopedEmployees)[number]>();
+    for (const scopedEmployee of scopedEmployees) {
+      if (!latestScopedEmployeeByStaffId.has(scopedEmployee.staffId)) {
+        latestScopedEmployeeByStaffId.set(scopedEmployee.staffId, scopedEmployee);
+      }
+    }
+
+    const scopedStaff = [...latestScopedEmployeeByStaffId.values()];
+    const scopedStaffIds = scopedStaff.map((employee) => employee.staffId);
+
+    const wsllRecords = scopedStaffIds.length > 0
+      ? await prisma.wsllRecord.findMany({
+          where: {
+            staffId: { in: scopedStaffIds }
+          },
+          orderBy: [{ uploadedAt: "desc" }, { createdAt: "desc" }]
+        })
+      : [];
+
+    const latestWsllByStaffId = new Map<string, (typeof wsllRecords)[number]>();
+    for (const record of wsllRecords) {
+      if (!latestWsllByStaffId.has(record.staffId)) {
+        latestWsllByStaffId.set(record.staffId, record);
+      }
+    }
+
+    const rows = scopedStaff.map((employee) => {
+      const latestRecord = latestWsllByStaffId.get(employee.staffId) ?? null;
+      const quarterScores = getQuarterScoresFromRawRow(latestRecord?.rawRowJson ?? null);
+
+      return {
+        staff_id: employee.staffId,
+        full_name: employee.fullName,
+        staff_role: employee.staffRole,
+        q1_wsll: quarterScores.q1_wsll,
+        q2_wsll: quarterScores.q2_wsll,
+        q3_wsll: quarterScores.q3_wsll,
+        q4_wsll: quarterScores.q4_wsll,
+        wsll_uploaded_at: latestRecord?.uploadedAt ?? null
+      };
+    });
+
+    const rowsWithWsll = rows.filter(
+      (row) => row.q1_wsll !== null || row.q2_wsll !== null || row.q3_wsll !== null || row.q4_wsll !== null
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        total_va_count: scopedStaff.length,
+        wsll_row_count: rowsWithWsll.length,
+        rows: rowsWithWsll
+      }
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: { message: error instanceof Error ? error.message : "Failed to load scoped WSLL table" }
+    });
+  }
+});
+
+app.get("/wsll/import-history/sm/:smOwnerId", async (req, res) => {
+  try {
+    const smOwnerId = decodeURIComponent(req.params.smOwnerId ?? "").trim();
+    if (!smOwnerId) {
+      return res.status(400).json({
+        success: false,
+        error: { message: "smOwnerId is required" }
+      });
+    }
+
+    const virtualAssistants = await getSMDirectory(smOwnerId);
+    const normalizedStaffIds = [
+      ...new Set(
+        virtualAssistants
+          .map((va) => normalizeCsvStaffId(va.staff_id))
+          .filter((staffId): staffId is string => Boolean(staffId))
+      )
+    ];
+
+    if (normalizedStaffIds.length === 0) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          sm_owner_id: smOwnerId,
+          entries: []
+        }
+      });
+    }
+
+    const records = await prisma.wsllRecord.findMany({
+      where: {
+        source: WsllRecordSource.CSV,
+        staffId: { in: normalizedStaffIds }
+      },
+      orderBy: [{ uploadedAt: "desc" }, { createdAt: "desc" }]
+    });
+
+    const grouped = new Map<string, {
+      id: string;
+      fileName: string;
+      imported: number;
+      flagged: number;
+      totalRows: number;
+      smOwnerId: string;
+      uploadedAt: string;
+      uploadedBy: string | null;
+    }>();
+
+    for (const record of records) {
+      const { uploadSessionId, uploadFileName } = getUploadSessionMeta(record.rawRowJson);
+      const minuteKey = record.uploadedAt.toISOString().slice(0, 16);
+      const fallbackKey = `legacy:${record.uploadedBy ?? "unknown"}:${minuteKey}`;
+      const groupKey = uploadSessionId ? `session:${uploadSessionId}` : fallbackKey;
+
+      const existing = grouped.get(groupKey);
+      if (!existing) {
+        grouped.set(groupKey, {
+          id: uploadSessionId ?? fallbackKey,
+          fileName: uploadFileName ?? "wsll_upload.csv",
+          imported: 1,
+          flagged: 0,
+          totalRows: 1,
+          smOwnerId,
+          uploadedAt: record.uploadedAt.toISOString(),
+          uploadedBy: record.uploadedBy ?? null
+        });
+        continue;
+      }
+
+      existing.imported += 1;
+      existing.totalRows += 1;
+    }
+
+    const entries = Array.from(grouped.values())
+      .sort((a, b) => (a.uploadedAt < b.uploadedAt ? 1 : -1))
+      .slice(0, 50);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        sm_owner_id: smOwnerId,
+        entries
+      }
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: { message: error instanceof Error ? error.message : "Failed to load WSLL import history" }
     });
   }
 });
@@ -2382,6 +2822,38 @@ app.patch("/cases/:id/compensation/current", express.json(), async (req, res) =>
 // RECOMMENDATION COMPUTE ENDPOINT
 // ============================================================================
 
+app.post("/cases/:id/recommendation/submit-for-review", express.json(), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      recommendationType,
+      targetSalary,
+      increaseAmount,
+      increasePercent,
+      customInputMode,
+      justification,
+      submittedBy
+    } = req.body;
+
+    const data = await submitRecommendationForReview(id, {
+      recommendationType,
+      targetSalary,
+      increaseAmount,
+      increasePercent,
+      customInputMode,
+      justification,
+      submittedBy
+    });
+
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    return res.status(400).json({
+      success: false,
+      error: { message: error instanceof Error ? error.message : "Failed to submit recommendation for review" }
+    });
+  }
+});
+
 app.post("/cases/:id/recommendation/recompute", express.json(), async (req, res) => {
   try {
     const { id } = req.params;
@@ -2395,6 +2867,27 @@ app.post("/cases/:id/recommendation/recompute", express.json(), async (req, res)
     return res.status(500).json({
       success: false,
       error: { message: error instanceof Error ? error.message : "Failed to recompute recommendation" },
+    });
+  }
+});
+
+app.post("/cases/:id/recommendation/review", express.json(), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { decision, reviewerNotes, reviewedBy, override } = req.body;
+
+    const data = await reviewRecommendation(id, {
+      decision,
+      reviewerNotes,
+      reviewedBy,
+      override
+    });
+
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    return res.status(400).json({
+      success: false,
+      error: { message: error instanceof Error ? error.message : "Failed to review recommendation" }
     });
   }
 });
@@ -2612,10 +3105,10 @@ app.post("/cases/:id/payroll/process", express.json(), async (req, res) => {
       });
     }
 
-    if (caseRecord.status !== "PAYROLL_PENDING") {
+    if (caseRecord.status !== "PAYROLL_PENDING" && caseRecord.status !== "SUBMITTED_TO_PAYROLL") {
       return res.status(400).json({
         success: false,
-        error: { message: "Case must be in PAYROLL_PENDING status" },
+        error: { message: "Case must be in SUBMITTED_TO_PAYROLL status" },
       });
     }
 
@@ -2647,6 +3140,20 @@ app.post("/cases/:id/payroll/process", express.json(), async (req, res) => {
     return res.status(500).json({
       success: false,
       error: { message: error instanceof Error ? error.message : "Failed to process payroll" },
+    });
+  }
+});
+
+app.post("/cases/:id/submit-to-payroll", express.json(), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { submittedBy } = req.body;
+    const data = await submitCaseToPayroll(id, submittedBy);
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    return res.status(400).json({
+      success: false,
+      error: { message: error instanceof Error ? error.message : "Failed to submit case to payroll" }
     });
   }
 });

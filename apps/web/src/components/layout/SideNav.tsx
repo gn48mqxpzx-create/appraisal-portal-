@@ -14,6 +14,7 @@ export function SideNav({ currentPage, onNavigate, viewerSession, onLogout, side
   const allNavItems = [
     { id: 'dashboard', label: 'Dashboard', icon: '📊' },
     { id: 'cases', label: 'Appraisal Cases', icon: '📋' },
+    { id: 'review-queue', label: 'Review Queue', icon: '🧾' },
     { id: 'wsll', label: 'WSLL Import', icon: '📁' },
     { id: 'payroll', label: 'Payroll Export', icon: '💰' },
     { id: 'admin', label: 'Admin Console', icon: '⚙️' }

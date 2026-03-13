@@ -54,7 +54,7 @@ export async function sendToSiteLead(caseId: string) {
   await prisma.appraisalCase.update({
     where: { id: caseId },
     data: {
-      status: "SITE_LEAD_PENDING",
+      status: "SUBMITTED_FOR_REVIEW",
     },
   });
 
@@ -86,7 +86,7 @@ export async function siteLeadApprove(
   await prisma.appraisalCase.update({
     where: { id: caseId },
     data: {
-      status: "SITE_LEAD_APPROVED",
+      status: "REVIEW_APPROVED",
     },
   });
 
@@ -118,7 +118,7 @@ export async function siteLeadReject(
   await prisma.appraisalCase.update({
     where: { id: caseId },
     data: {
-      status: "DRAFT",
+      status: "REVIEW_REJECTED",
     },
   });
 
@@ -141,50 +141,9 @@ export async function secureClientApproval(caseId: string, createdBy: string) {
     throw new Error("Case not found");
   }
 
-  if (caseRecord.status !== "SITE_LEAD_APPROVED") {
-    throw new Error("Case must be Site Lead Approved to secure client approval");
+  if (caseRecord.status !== "REVIEW_APPROVED") {
+    throw new Error("Case must be review approved to secure client approval");
   }
-
-  const currentBase = caseRecord.compCurrent?.baseSalary || 0;
-  const benchmarkBase = caseRecord.marketSnapshot?.benchmarkBaseUsed || 0;
-  const recommendedNewBase = caseRecord.recommendation?.recommendedNewBase || currentBase;
-  const overrideNewBase = caseRecord.override?.overrideNewBase;
-  const effectivityDate = caseRecord.payrollProcessing?.effectivityDate || "TBD";
-
-  const finalNewBase = overrideNewBase || recommendedNewBase;
-
-  const subject = `Salary Review Approval Required - ${caseRecord.staffId} ${caseRecord.fullName} (${caseRecord.staffRole})`;
-  const body = `Dear Client,
-
-We are seeking your approval for the following salary adjustment:
-
-Employee: ${caseRecord.fullName}
-Staff ID: ${caseRecord.staffId}
-Role: ${caseRecord.staffRole}
-Company: ${caseRecord.companyName}
-
-Current Base Salary: $${Number(currentBase).toFixed(2)}
-Market Benchmark: $${Number(benchmarkBase).toFixed(2)}
-Recommended New Base: $${Number(recommendedNewBase).toFixed(2)}
-${overrideNewBase ? `Override New Base: $${Number(overrideNewBase).toFixed(2)}` : ""}
-Final Proposed Base: $${Number(finalNewBase).toFixed(2)}
-
-Proposed Effectivity Date: ${effectivityDate}
-
-Please review and approve this adjustment.
-
-Thank you.`;
-
-  // Store email event
-  await prisma.caseEmailEvent.create({
-    data: {
-      caseId,
-      eventType: "CLIENT_APPROVAL_DRAFTED",
-      subject,
-      body,
-      createdBy,
-    },
-  });
 
   // Update approval workflow
   await prisma.caseApprovalWorkflow.upsert({
@@ -202,13 +161,11 @@ Thank you.`;
   await prisma.appraisalCase.update({
     where: { id: caseId },
     data: {
-      status: "CLIENT_PENDING",
+      status: "PENDING_CLIENT_APPROVAL",
     },
   });
 
-  const mailtoUrl = `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
-
-  return { mailtoUrl, subject, body };
+  return { success: true, createdBy };
 }
 
 export async function clientApprove(caseId: string, approvedBy: string, comment?: string) {
@@ -225,8 +182,8 @@ export async function clientApprove(caseId: string, approvedBy: string, comment?
     throw new Error("Case not found");
   }
 
-  if (caseRecord.status !== "CLIENT_PENDING") {
-    throw new Error("Case must be in CLIENT_PENDING status");
+  if (caseRecord.status !== "PENDING_CLIENT_APPROVAL") {
+    throw new Error("Case must be in PENDING_CLIENT_APPROVAL status");
   }
 
   // Check that evidence exists
@@ -261,22 +218,11 @@ export async function clientApprove(caseId: string, approvedBy: string, comment?
     },
   });
 
-  // Update case status to CLIENT_APPROVED then immediately to PAYROLL_PENDING
   await prisma.appraisalCase.update({
     where: { id: caseId },
     data: {
-      status: "PAYROLL_PENDING",
+      status: "CLIENT_APPROVED",
     },
-  });
-
-  // Ensure payroll processing record exists
-  await prisma.payrollProcessing.upsert({
-    where: { caseId },
-    create: {
-      caseId,
-      payrollStatus: "PENDING",
-    },
-    update: {},
   });
 
   return { success: true };

@@ -519,3 +519,86 @@ export async function syncEmployeeDirectory(): Promise<{
     throw error;
   }
 }
+
+/**
+ * Resolve Success Manager and Relationship Manager display names for a batch of entries.
+ *
+ * Fallback chain for SM:
+ *  1. directSmValue — the raw value from intake (often already the SM display name)
+ *  2. Look up the employee in EmployeeDirectory by staffId → get smName (HubSpot owner ID)
+ *     → look up SM record with smOwnerId = smName → return SM fullName
+ *
+ * Fallback chain for RM:
+ *  1. directRmValue — the raw value from intake
+ *  2. Look up the employee in EmployeeDirectory by staffId → get rmName (display name) → use as-is
+ *
+ * Returns a Map keyed by staffId with resolved { smName, rmName }.
+ */
+export async function resolveManagerNamesForCases(
+  entries: Array<{ staffId: string; directSmValue: string | null; directRmValue: string | null }>
+): Promise<Map<string, { smName: string | null; rmName: string | null }>> {
+  const result = new Map<string, { smName: string | null; rmName: string | null }>();
+
+  // Collect staff IDs where fallback lookup is needed
+  const needsSmFallback: string[] = [];
+  const needsRmFallback: string[] = [];
+
+  for (const entry of entries) {
+    const sm = entry.directSmValue?.trim() || null;
+    const rm = entry.directRmValue?.trim() || null;
+    result.set(entry.staffId, { smName: sm, rmName: rm });
+    if (!sm) needsSmFallback.push(entry.staffId);
+    if (!rm) needsRmFallback.push(entry.staffId);
+  }
+
+  // Deduplicate
+  const fallbackStaffIds = [...new Set([...needsSmFallback, ...needsRmFallback])];
+  if (fallbackStaffIds.length === 0) return result;
+
+  // Batch fetch employee directory records for fallback staff IDs
+  const dirRecords = await prisma.employeeDirectory.findMany({
+    where: { staffId: { in: fallbackStaffIds } },
+    select: { staffId: true, smName: true, rmName: true }
+  });
+
+  const dirByStaffId = new Map(dirRecords.map((r) => [r.staffId, r]));
+
+  // For SM fallback: resolve owner IDs → SM display names
+  const ownerIds = [...new Set(
+    needsSmFallback
+      .map((sid) => dirByStaffId.get(sid)?.smName)
+      .filter((id): id is string => Boolean(id))
+  )];
+
+  const smOwnerMap = new Map<string, string>();
+  if (ownerIds.length > 0) {
+    const smRecords = await prisma.employeeDirectory.findMany({
+      where: {
+        smOwnerId: { in: ownerIds },
+        employeeType: "SM"
+      },
+      select: { smOwnerId: true, fullName: true }
+    });
+    for (const sm of smRecords) {
+      if (sm.smOwnerId) smOwnerMap.set(sm.smOwnerId, sm.fullName);
+    }
+  }
+
+  // Apply fallback values
+  for (const staffId of needsSmFallback) {
+    const existing = result.get(staffId);
+    if (!existing) continue;
+    const ownerId = dirByStaffId.get(staffId)?.smName;
+    const resolvedSm = (ownerId && smOwnerMap.get(ownerId)) || null;
+    result.set(staffId, { ...existing, smName: resolvedSm });
+  }
+
+  for (const staffId of needsRmFallback) {
+    const existing = result.get(staffId);
+    if (!existing) continue;
+    const resolvedRm = dirByStaffId.get(staffId)?.rmName?.trim() || null;
+    result.set(staffId, { ...existing, rmName: resolvedRm });
+  }
+
+  return result;
+}

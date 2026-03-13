@@ -85,10 +85,13 @@ export function WsllUploadPage() {
 
         <form onSubmit={handleUpload} className="space-y-4">
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Select CSV File</label>
+            <label htmlFor="wsll-upload-page-file-input" className="block text-sm font-medium text-gray-700 mb-2">Select CSV File</label>
             <input
+              id="wsll-upload-page-file-input"
               type="file"
               accept=".csv"
+              aria-label="Select CSV File"
+              title="Select CSV File"
               onChange={(e) => setUploadFile(e.target.files?.[0] || null)}
               className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
             />

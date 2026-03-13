@@ -258,6 +258,12 @@ model AppraisalCase {
 
 enum CaseStatus {
   DRAFT
+  SUBMITTED_FOR_REVIEW
+  REVIEW_APPROVED
+  REVIEW_REJECTED
+  PENDING_CLIENT_APPROVAL
+  CLIENT_APPROVED
+  SUBMITTED_TO_PAYROLL
   IN_REVIEW
   BLOCKED
   APPROVED
@@ -266,7 +272,6 @@ enum CaseStatus {
   SITE_LEAD_PENDING
   SITE_LEAD_APPROVED
   CLIENT_PENDING
-  CLIENT_APPROVED
   PAYROLL_PENDING
   PAYROLL_PROCESSED
   LOCKED
@@ -937,6 +942,27 @@ model CaseRecommendation {
   recommendedAmount     Decimal  @default(0) @db.Decimal(12, 2)
   recommendedPercent    Decimal? @db.Decimal(10, 4)
   recommendedNewBase    Decimal  @default(0) @db.Decimal(12, 2)
+
+  submittedRecommendationType String?
+  submittedTargetSalary       Decimal? @db.Decimal(12, 2)
+  submittedIncreaseAmount     Decimal? @db.Decimal(12, 2)
+  submittedIncreasePercent    Decimal? @db.Decimal(10, 4)
+  submittedGuardrailLevel     String?
+  submittedGuardrailAction    String?
+  submittedCustomInputMode    String?
+  submittedJustification      String?
+  submittedBy                 String?
+  submittedAt                 DateTime?
+
+  finalRecommendationType     String?
+  finalTargetSalary           Decimal? @db.Decimal(12, 2)
+  finalIncreaseAmount         Decimal? @db.Decimal(12, 2)
+  finalIncreasePercent        Decimal? @db.Decimal(10, 4)
+  finalGuardrailLevel         String?
+  reviewDecision              String?
+  reviewerNotes               String?
+  reviewedBy                  String?
+  reviewedAt                  DateTime?
   
   computedAt            DateTime @default(now())
   computedBy            String?

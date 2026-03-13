@@ -8,6 +8,7 @@ import PayrollExport from './pages/PayrollExport';
 import AdminConsole from './pages/AdminConsole';
 import LoginPage from './pages/LoginPage';
 import CaseDetailPage from './pages/CaseDetailPage';
+import ReviewQueuePage from './pages/ReviewQueuePage';
 import { 
   ViewerSession, 
   enrichViewerSession, 
@@ -142,6 +143,8 @@ function App() {
         ) : (
           <Dashboard viewerSession={viewerSession} />
         );
+      case 'review-queue':
+        return <ReviewQueuePage viewerSession={viewerSession} />;
       case 'wsll':
         return <WsllUpload viewerSession={viewerSession} />;
       case 'payroll':

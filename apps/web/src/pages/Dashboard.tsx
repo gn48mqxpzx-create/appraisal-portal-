@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
-import { ViewerSession, loadViewerSession } from '../utils/auth';
+import { useEffect, useMemo, useState } from 'react';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
+import { ViewerSession } from '../utils/auth';
 
 interface AppraisalMetrics {
   eligible: number;
@@ -16,6 +16,16 @@ interface DashboardProps {
 }
 
 export function Dashboard({ viewerSession }: DashboardProps) {
+  const [metrics, setMetrics] = useState<AppraisalMetrics>({
+    eligible: 0,
+    draft: 0,
+    submitted: 0,
+    forReview: 0,
+    approved: 0,
+    rejected: 0
+  });
+  const [loadingMetrics, setLoadingMetrics] = useState(false);
+
   if (!viewerSession) {
     return (
       <div style={{ backgroundColor: '#f9fafb', minHeight: '100vh', padding: '24px' }}>
@@ -39,34 +49,63 @@ export function Dashboard({ viewerSession }: DashboardProps) {
     );
   }
 
-  const getMetrics = (): AppraisalMetrics => {
-    if (!viewerSession) {
-      return {
-        eligible: 0,
-        draft: 0,
-        submitted: 0,
-        forReview: 0,
-        approved: 0,
-        rejected: 0
-      };
-    }
+  useEffect(() => {
+    const loadDashboardSummary = async () => {
+      if (!viewerSession) {
+        return;
+      }
 
-    // Use real eligible count from scope
-    const eligible = viewerSession.scope_summary.total_va_count;
+      setLoadingMetrics(true);
+      try {
+        const viewerRole = viewerSession.role === 'Admin' ? 'ADMIN' : viewerSession.role;
+        const params = new URLSearchParams({
+          viewerRole
+        });
 
-    // Mock case statuses for now (to be replaced with real data from backend)
-    const mockRatio = Math.max(0.3, Math.min(eligible, 50));
-    return {
-      eligible,
-      draft: Math.floor(mockRatio * 0.3),
-      submitted: Math.floor(mockRatio * 0.25),
-      forReview: Math.floor(mockRatio * 0.2),
-      approved: Math.floor(mockRatio * 0.15),
-      rejected: Math.floor(mockRatio * 0.1)
+        if (viewerRole !== 'ADMIN') {
+          params.set('viewerName', viewerSession.viewer_name);
+          params.set('viewerEmail', viewerSession.viewer_email);
+        }
+
+        const response = await fetch(`http://localhost:3001/dashboard/summary?${params.toString()}`);
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          setMetrics({
+            eligible: 0,
+            draft: 0,
+            submitted: 0,
+            forReview: 0,
+            approved: 0,
+            rejected: 0
+          });
+          return;
+        }
+
+        const apiData = payload?.data || {};
+        setMetrics({
+          eligible: Number(apiData.eligible || 0),
+          draft: Number(apiData.draft || 0),
+          submitted: Number(apiData.submitted || 0),
+          forReview: Number(apiData.forReview || 0),
+          approved: Number(apiData.approved || 0),
+          rejected: Number(apiData.rejected || 0)
+        });
+      } catch {
+        setMetrics({
+          eligible: 0,
+          draft: 0,
+          submitted: 0,
+          forReview: 0,
+          approved: 0,
+          rejected: 0
+        });
+      } finally {
+        setLoadingMetrics(false);
+      }
     };
-  };
 
-  const metrics = getMetrics();
+    void loadDashboardSummary();
+  }, [viewerSession]);
 
   const pipelineData = [
     { name: 'Draft', value: metrics.draft, fill: '#e8e8e8' },
@@ -194,6 +233,7 @@ export function Dashboard({ viewerSession }: DashboardProps) {
               <h3 style={{ fontSize: '14px', fontWeight: '600', marginBottom: '16px', color: '#1f2937' }}>
                 Appraisal Pipeline
               </h3>
+              {loadingMetrics ? <p style={{ fontSize: '12px', color: '#6b7280' }}>Loading live workflow data...</p> : null}
               <ResponsiveContainer width="100%" height={200}>
                 <BarChart data={pipelineData}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />

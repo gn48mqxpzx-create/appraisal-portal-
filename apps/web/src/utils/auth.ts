@@ -3,6 +3,7 @@ export type Role = 'SM' | 'RM' | 'Admin';
 export interface Permissions {
   canViewDashboard: boolean;
   canViewCases: boolean;
+  canViewReviewQueue: boolean;
   canViewWsll: boolean;
   canEditWsll: boolean;
   canUploadWsll: boolean;
@@ -48,6 +49,7 @@ export function getPermissionsForRole(role: Role): Permissions {
       return {
         canViewDashboard: true,
         canViewCases: true,
+        canViewReviewQueue: true,
         canViewWsll: true,
         canEditWsll: true,
         canUploadWsll: true,
@@ -59,9 +61,10 @@ export function getPermissionsForRole(role: Role): Permissions {
       return {
         canViewDashboard: true,
         canViewCases: true,
+        canViewReviewQueue: true,
         canViewWsll: true,
-        canEditWsll: true,
-        canUploadWsll: true,
+        canEditWsll: false,
+        canUploadWsll: false,
         canViewPayrollExport: false,
         canViewAdminConsole: false
       };
@@ -70,6 +73,7 @@ export function getPermissionsForRole(role: Role): Permissions {
       return {
         canViewDashboard: true,
         canViewCases: true,
+        canViewReviewQueue: false,
         canViewWsll: true,
         canEditWsll: false,
         canUploadWsll: false,
@@ -81,6 +85,7 @@ export function getPermissionsForRole(role: Role): Permissions {
       return {
         canViewDashboard: false,
         canViewCases: false,
+        canViewReviewQueue: false,
         canViewWsll: false,
         canEditWsll: false,
         canUploadWsll: false,
@@ -141,8 +146,10 @@ export function canAccessPage(permissions: Permissions, pageId: string): boolean
       return permissions.canViewDashboard;
     case 'cases':
       return permissions.canViewCases;
-        case 'case-detail':
-          return permissions.canViewCases;
+    case 'case-detail':
+      return permissions.canViewCases;
+    case 'review-queue':
+      return permissions.canViewReviewQueue;
     case 'wsll':
       return permissions.canViewWsll;
     case 'payroll':

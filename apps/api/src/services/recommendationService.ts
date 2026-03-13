@@ -1,4 +1,8 @@
 import { PrismaClient, WsllGateStatus } from "@prisma/client";
+import {
+  getLatestWsllEligibilityByStaffId,
+  wsllStatusToGateStatus
+} from "./wsllEligibilityService";
 
 const prisma = new PrismaClient();
 
@@ -58,23 +62,9 @@ export async function computeRecommendation(caseId: string, computedBy?: string)
     }
   }
 
-  // Fetch WSLL score for the cycle
-  const wsllScore = await prisma.wsllScore.findUnique({
-    where: {
-      cycleId_staffId: {
-        cycleId: caseRecord.cycleId,
-        staffId: caseRecord.staffId,
-      },
-    },
-  });
-
-  let wsllGateStatus: WsllGateStatus = WsllGateStatus.MISSING;
-  let wsllScoreUsed: number | null = null;
-
-  if (wsllScore) {
-    wsllScoreUsed = Number(wsllScore.wsllScore);
-    wsllGateStatus = wsllScoreUsed >= 3.0 ? WsllGateStatus.PASS : WsllGateStatus.FAIL;
-  }
+  const wsllEligibility = await getLatestWsllEligibilityByStaffId(caseRecord.staffId);
+  const wsllGateStatus: WsllGateStatus = wsllStatusToGateStatus(wsllEligibility.status);
+  const wsllScoreUsed: number | null = wsllEligibility.averageWsll;
 
   // Store market snapshot
   await prisma.caseMarketSnapshot.upsert({
@@ -105,8 +95,7 @@ export async function computeRecommendation(caseId: string, computedBy?: string)
   let recommendedPercent = null;
   let recommendedNewBase = currentBase;
 
-  // If WSLL < 3.0, recommendation must be 0
-  if (wsllGateStatus === WsllGateStatus.FAIL) {
+  if (wsllGateStatus !== WsllGateStatus.PASS) {
     recommendedAmount = 0;
     recommendedPercent = 0;
     recommendedNewBase = currentBase;
