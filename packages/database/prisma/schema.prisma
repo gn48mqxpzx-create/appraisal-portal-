@@ -1172,6 +1172,28 @@ model CurrentCompensation {
 }
 
 // ============================================================================
+// INCREASE GUARDRAILS (Admin-configurable salary increase thresholds)
+// ============================================================================
+
+model IncreaseGuardrail {
+  id             String   @id @default(uuid())
+  levelName      String   // "Green", "Yellow", "Red"
+  colorCode      String   // "#22c55e", "#eab308", "#ef4444"
+  minPercent     Decimal? @db.Decimal(8, 4) // null = no lower bound
+  maxPercent     Decimal? @db.Decimal(8, 4) // null = no upper bound
+  minAmount      Decimal? @db.Decimal(12, 2)
+  maxAmount      Decimal? @db.Decimal(12, 2)
+  actionRequired String   // "Standard Review", "Manager Justification Required", etc.
+  isActive       Boolean  @default(true)
+  sortOrder      Int      @default(0)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([isActive, sortOrder])
+  @@map("increase_guardrails")
+}
+
+// ============================================================================
 // EMPLOYEE DIRECTORY (Synced from HubSpot)
 // ============================================================================
 

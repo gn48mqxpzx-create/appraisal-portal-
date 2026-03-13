@@ -3,7 +3,7 @@ import cors from "cors";
 import express, { type Request, type Response } from "express";
 import multer from "multer";
 import { parse } from "csv-parse/sync";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient, Prisma } from "@prisma/client";
 import scopeRoutes from "./scopeRoutes";
 import directoryRoutes from "./directoryRoutes";
 import { loginHandler, requireAuth, meHandler } from "./auth";
@@ -33,6 +33,14 @@ const upload = multer({ storage: multer.memoryStorage() });
 const ADMIN_EMAIL = "uly@vaplatinum.com.au";
 
 const reportPathByBatchId = (batchId: string) => `/intake/upload/${batchId}/questionable-rows.csv`;
+
+type BenchmarkStatus =
+  | "READY"
+  | "MISSING_ROLE_MAPPING"
+  | "MISSING_STANDARDIZED_ROLE"
+  | "MISSING_MARKET_MATRIX"
+  | "MISSING_CURRENT_COMPENSATION"
+  | "MISSING_START_DATE";
 
 const startOfTodayUtc = () => {
   const now = new Date();
@@ -1050,6 +1058,175 @@ app.get("/cases", async (req: Request, res: Response) => {
       success: false,
       error: {
         message: error instanceof Error ? error.message : "Failed to fetch cases"
+      }
+    });
+  }
+});
+
+// GET /cases/benchmark/:staffId - Resolve case benchmark summary for display
+app.get("/cases/benchmark/:staffId", async (req: Request, res: Response) => {
+  try {
+    const staffId = normalizeCsvStaffId(req.params.staffId ?? "");
+    if (!staffId) {
+      return res.status(400).json({
+        success: false,
+        error: {
+          message: "staffId is required"
+        }
+      });
+    }
+
+    const employee = await prisma.employeeDirectory.findUnique({
+      where: { staffId },
+      include: { currentCompensation: true }
+    });
+
+    if (!employee) {
+      return res.status(404).json({
+        success: false,
+        error: {
+          message: "Employee not found"
+        }
+      });
+    }
+
+    const rawRole = employee.staffRole?.trim() || null;
+    const basePayload = {
+      staffId: employee.staffId,
+      fullName: employee.fullName,
+      rawRole,
+      standardizedRole: null as string | null,
+      matchSource: null as string | null,
+      confidenceScore: null as number | null,
+      staffStartDate: employee.staffStartDate,
+      tenureDisplay: null as string | null,
+      tenureBand: null as TenureBandLabel | null,
+      currentCompensation: formatDecimalMoney(employee.currentCompensation?.currentCompensation),
+      currency: employee.currentCompensation?.currency ?? null,
+      effectiveDate: employee.currentCompensation?.effectiveDate ?? null,
+      marketMin: null as string | null,
+      marketMax: null as string | null,
+      marketMidpoint: null as string | null,
+      gapToMidpoint: null as string | null,
+      benchmarkStatus: "MISSING_ROLE_MAPPING" as BenchmarkStatus
+    };
+
+    if (!rawRole) {
+      return res.status(200).json({ success: true, data: basePayload });
+    }
+
+    const mapping = await prisma.roleAlignmentMapping.findFirst({
+      where: {
+        sourceRoleName: {
+          equals: rawRole,
+          mode: "insensitive"
+        }
+      },
+      include: {
+        standardizedRole: true
+      }
+    });
+
+    if (!mapping) {
+      return res.status(200).json({ success: true, data: basePayload });
+    }
+
+    const resolvedWithMapping = {
+      ...basePayload,
+      standardizedRole: mapping.standardizedRole?.roleName ?? mapping.mappedRoleName ?? null,
+      matchSource: mapping.matchSource,
+      confidenceScore: formatDecimalScore(mapping.confidenceScore)
+    };
+
+    if (!mapping.standardizedRoleId || !mapping.standardizedRole) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          ...resolvedWithMapping,
+          benchmarkStatus: "MISSING_STANDARDIZED_ROLE" as BenchmarkStatus
+        }
+      });
+    }
+
+    const tenure = resolveTenureBenchmark(employee.staffStartDate);
+    const resolvedWithTenure = {
+      ...resolvedWithMapping,
+      tenureDisplay: tenure.tenureDisplay,
+      tenureBand: tenure.tenureBand
+    };
+
+    if (!tenure.tenureBand) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          ...resolvedWithTenure,
+          benchmarkStatus: "MISSING_START_DATE" as BenchmarkStatus
+        }
+      });
+    }
+
+    const matrixRow = await prisma.marketValueMatrix.findFirst({
+      where: {
+        tenureBand: tenure.tenureBand,
+        OR: [
+          { standardizedRoleId: mapping.standardizedRole.id },
+          {
+            roleName: {
+              equals: mapping.standardizedRole.roleName,
+              mode: "insensitive"
+            }
+          }
+        ]
+      }
+    });
+
+    const resolvedWithMatrix = {
+      ...resolvedWithTenure,
+      marketMin: formatDecimalMoney(matrixRow?.minSalary),
+      marketMax: formatDecimalMoney(matrixRow?.maxSalary)
+    };
+
+    if (!matrixRow) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          ...resolvedWithMatrix,
+          benchmarkStatus: "MISSING_MARKET_MATRIX" as BenchmarkStatus
+        }
+      });
+    }
+
+    const compensation = employee.currentCompensation;
+    if (!compensation) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          ...resolvedWithMatrix,
+          benchmarkStatus: "MISSING_CURRENT_COMPENSATION" as BenchmarkStatus
+        }
+      });
+    }
+
+    const marketMidpoint = matrixRow.minSalary.plus(matrixRow.maxSalary).dividedBy(new Prisma.Decimal(2));
+    const gapToMidpoint = marketMidpoint.minus(compensation.currentCompensation);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        ...resolvedWithMatrix,
+        currentCompensation: formatDecimalMoney(compensation.currentCompensation),
+        currency: compensation.currency,
+        effectiveDate: compensation.effectiveDate,
+        marketMidpoint: formatDecimalMoney(marketMidpoint),
+        gapToMidpoint: formatDecimalMoney(gapToMidpoint),
+        benchmarkStatus: "READY" as BenchmarkStatus
+      }
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: {
+        message: error instanceof Error ? error.message : "Failed to resolve case benchmark"
       }
     });
   }
@@ -2725,6 +2902,88 @@ const parseSalaryValue = (value: unknown): number | null => {
   return Number.isFinite(parsed) ? parsed : null;
 };
 
+const formatDecimalMoney = (value: Prisma.Decimal | null | undefined): string | null => {
+  if (!value) {
+    return null;
+  }
+
+  return value.toFixed(2);
+};
+
+const formatDecimalScore = (value: Prisma.Decimal | null | undefined): number | null => {
+  if (!value) {
+    return null;
+  }
+
+  return Number(value.toFixed(4));
+};
+
+const getElapsedMonths = (startDate: Date, endDate: Date): number => {
+  let months = (endDate.getUTCFullYear() - startDate.getUTCFullYear()) * 12;
+  months += endDate.getUTCMonth() - startDate.getUTCMonth();
+
+  if (endDate.getUTCDate() < startDate.getUTCDate()) {
+    months -= 1;
+  }
+
+  return months;
+};
+
+const formatTenureDisplay = (totalMonths: number): string => {
+  if (totalMonths <= 0) {
+    return "0m";
+  }
+
+  const years = Math.floor(totalMonths / 12);
+  const months = totalMonths % 12;
+
+  if (years === 0) {
+    return `${months}m`;
+  }
+
+  if (months === 0) {
+    return `${years}y`;
+  }
+
+  return `${years}y ${months}m`;
+};
+
+const resolveTenureBenchmark = (staffStartDate: Date | null | undefined): {
+  tenureDisplay: string | null;
+  tenureBand: TenureBandLabel | null;
+} => {
+  if (!staffStartDate || Number.isNaN(staffStartDate.getTime())) {
+    return {
+      tenureDisplay: null,
+      tenureBand: null
+    };
+  }
+
+  const totalMonths = getElapsedMonths(staffStartDate, new Date());
+  if (totalMonths < 0) {
+    return {
+      tenureDisplay: null,
+      tenureBand: null
+    };
+  }
+
+  let tenureBand: TenureBandLabel;
+  if (totalMonths < 12) {
+    tenureBand = "T1";
+  } else if (totalMonths < 24) {
+    tenureBand = "T2";
+  } else if (totalMonths < 48) {
+    tenureBand = "T3";
+  } else {
+    tenureBand = "T4";
+  }
+
+  return {
+    tenureDisplay: formatTenureDisplay(totalMonths),
+    tenureBand
+  };
+};
+
 const toTitleCase = (value: string): string =>
   value
     .toLowerCase()
@@ -2931,6 +3190,46 @@ app.get("/market-matrix", async (req, res) => {
     });
   } catch (error) {
     return res.status(500).json({ error: error instanceof Error ? error.message : "Failed to fetch market matrix" });
+  }
+});
+
+// GET /market-matrix/roles-without-matrices  — standardized roles that don't yet have a matrix
+app.get("/market-matrix/roles-without-matrices", async (req, res) => {
+  try {
+    if (!ensureAdmin(req, res)) {
+      return;
+    }
+
+    // Get all active standardized roles
+    const allRoles = await prisma.standardizedRole.findMany({
+      where: { isActive: true },
+      orderBy: { roleName: "asc" }
+    });
+
+    // Get roles that have at least one matrix entry
+    const rolesWithMatrices = await prisma.marketValueMatrix.findMany({
+      where: {
+        standardizedRoleId: {
+          not: null
+        }
+      },
+      distinct: ["standardizedRoleId"],
+      select: {
+        standardizedRoleId: true
+      }
+    });
+
+    const rolesWithMatricesSet = new Set(rolesWithMatrices.map(r => r.standardizedRoleId).filter(Boolean));
+
+    // Return only roles WITHOUT matrices
+    const rolesWithoutMatrices = allRoles.filter(role => !rolesWithMatricesSet.has(role.id));
+
+    return res.status(200).json({
+      success: true,
+      data: rolesWithoutMatrices
+    });
+  } catch (error) {
+    return res.status(500).json({ error: error instanceof Error ? error.message : "Failed to fetch roles without matrices" });
   }
 });
 
@@ -3260,19 +3559,21 @@ app.post("/market-matrix/role", express.json(), async (req, res) => {
       return res.status(400).json({ error: "At least one valid tenure band entry is required" });
     }
 
-    const savedRows = await prisma.$transaction(
-      normalizedEntries.map((entry: any) =>
-        prisma.marketValueMatrix.findFirst({
-          where: {
-            OR: [
-              { standardizedRoleId: standardizedRole.id },
-              { roleName: { equals: standardizedRole.roleName, mode: "insensitive" } }
-            ],
-            tenureBand: entry.tenureBand
-          }
-        }).then((existingRow) => {
+    const savedRows = await prisma.$transaction(async (tx) => {
+      return Promise.all(
+        normalizedEntries.map(async (entry: any) => {
+          const existingRow = await tx.marketValueMatrix.findFirst({
+            where: {
+              OR: [
+                { standardizedRoleId: standardizedRole.id },
+                { roleName: { equals: standardizedRole.roleName, mode: "insensitive" } }
+              ],
+              tenureBand: entry.tenureBand
+            }
+          });
+
           if (existingRow) {
-            return prisma.marketValueMatrix.update({
+            return tx.marketValueMatrix.update({
               where: { id: existingRow.id },
               data: {
                 roleName: standardizedRole.roleName,
@@ -3283,7 +3584,7 @@ app.post("/market-matrix/role", express.json(), async (req, res) => {
             });
           }
 
-          return prisma.marketValueMatrix.create({
+          return tx.marketValueMatrix.create({
             data: {
               roleName: standardizedRole.roleName,
               standardizedRoleId: standardizedRole.id,
@@ -3293,8 +3594,8 @@ app.post("/market-matrix/role", express.json(), async (req, res) => {
             }
           });
         })
-      )
-    );
+      );
+    });
 
     return res.status(200).json({
       success: true,
@@ -3454,10 +3755,19 @@ app.get("/role-library/analysis", async (req, res) => {
       .map((mapping) => ({
         id: mapping.id,
         rawRole: mapping.sourceRoleName,
-        suggestedStandardRole: getMappedRoleName(mapping),
-        finalStandardRole: getMappedRoleName(mapping),
-        matchStatus: "Learned" as MatchStatus,
-        matchSource: "SAVED_RULE",
+        suggestedStandardRole: mapping.standardizedRole ? getMappedRoleName(mapping) : mapping.mappedRoleName,
+        finalStandardRole: mapping.standardizedRole ? getMappedRoleName(mapping) : null,
+        matchStatus:
+          mapping.standardizedRoleId === null
+            ? mapping.matchSource === "NEW_ROLE_SUGGESTION"
+              ? ("New Role Suggested" as MatchStatus)
+              : ("Needs Review" as MatchStatus)
+            : mapping.matchSource === "AUTO_SIMILARITY"
+              ? ("Auto-Matched" as MatchStatus)
+              : mapping.matchSource === "ADMIN_CONFIRMED"
+                ? ("Approved" as MatchStatus)
+                : ("Learned" as MatchStatus),
+        matchSource: mapping.matchSource,
         confidenceScore: mapping.confidenceScore ? Number(mapping.confidenceScore) : null,
         standardizedRoleId: mapping.standardizedRoleId
       }));
@@ -3609,23 +3919,27 @@ app.put("/role-library/mappings/:id", express.json(), async (req, res) => {
     }
 
     const { id } = req.params;
-    const standardizedRoleName = typeof req.body?.standardizedRoleName === "string" ? req.body.standardizedRoleName.trim() : "";
-    const standardizedRoleId = typeof req.body?.standardizedRoleId === "string" ? req.body.standardizedRoleId : "";
+    const standardizedRoleId = typeof req.body?.standardizedRoleId === "string" ? req.body.standardizedRoleId.trim() : "";
+    const newRoleName = typeof req.body?.newRoleName === "string" ? req.body.newRoleName.trim() : "";
 
-    const role = await findOrCreateStandardizedRole({
-      standardizedRoleId: standardizedRoleId || undefined,
-      roleName: standardizedRoleName || undefined,
-      allowCreate: false
-    }).catch(() => null);
-
-    if (!role) {
-      return res.status(400).json({ error: "A valid standardized role is required" });
+    if (!standardizedRoleId && !newRoleName) {
+      return res.status(400).json({ error: "standardizedRoleId or newRoleName is required" });
     }
 
+    const existingMapping = await prisma.roleAlignmentMapping.findUnique({ where: { id } });
+    if (!existingMapping) {
+      return res.status(404).json({ error: "Role mapping not found" });
+    }
+
+    // findOrCreateStandardizedRole handles: find-by-id, case-insensitive dedup, and creation
+    const role = await findOrCreateStandardizedRole({
+      standardizedRoleId: standardizedRoleId || undefined,
+      roleName: newRoleName || undefined,
+      allowCreate: !!newRoleName
+    });
+
     const updated = await prisma.roleAlignmentMapping.update({
-      where: {
-        id
-      },
+      where: { id },
       data: {
         mappedRoleName: role.roleName,
         standardizedRoleId: role.id,
@@ -3673,6 +3987,209 @@ app.post("/role-library/mappings/reassign", express.json(), async (req, res) => 
     return res.status(500).json({
       error: error instanceof Error ? error.message : "Failed to reassign role mappings"
     });
+  }
+});
+
+app.post("/role-library/rematch/:mappingId", async (req, res) => {
+  try {
+    if (!ensureAdmin(req, res)) {
+      return;
+    }
+
+    const { mappingId } = req.params;
+    const existingMapping = await prisma.roleAlignmentMapping.findUnique({ where: { id: mappingId } });
+
+    if (!existingMapping) {
+      return res.status(404).json({ error: "Role mapping not found" });
+    }
+
+    const rawRole = existingMapping.sourceRoleName;
+    const standardizedRoles = await prisma.standardizedRole.findMany({
+      where: { isActive: true },
+      orderBy: { roleName: "asc" }
+    });
+
+    let bestRole: { id: string; roleName: string } | null = null;
+    let bestScore = 0;
+
+    for (const role of standardizedRoles) {
+      const score = scoreRoleSimilarity(rawRole, role.roleName);
+      if (score > bestScore) {
+        bestScore = score;
+        bestRole = { id: role.id, roleName: role.roleName };
+      }
+    }
+
+    const confidenceScore = Number(bestScore.toFixed(4));
+    const suggestedRole = bestRole && bestScore >= 0.55 ? bestRole.roleName : getNewRoleSuggestion(rawRole);
+    const matchSource = bestRole && bestScore >= 0.55 ? "AUTO_SIMILARITY" : "NEW_ROLE_SUGGESTION";
+
+    await prisma.roleAlignmentMapping.update({
+      where: { id: mappingId },
+      data: {
+        standardizedRoleId: null,
+        mappedRoleName: suggestedRole,
+        matchSource,
+        confidenceScore
+      }
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        mappingId,
+        rawRole,
+        suggestedRole,
+        confidenceScore,
+        matchSource
+      }
+    });
+  } catch (error) {
+    return res.status(500).json({
+      error: error instanceof Error ? error.message : "Failed to re-run role matching"
+    });
+  }
+});
+
+// ============================================================================
+// INCREASE GUARDRAILS — CRUD + EVALUATION
+// ============================================================================
+import { evaluateGuardrails } from "./services/guardrailService";
+
+// GET /guardrails - List all guardrail rows ordered by sortOrder
+app.get("/guardrails", async (_req: Request, res: Response) => {
+  try {
+    const rows = await prisma.increaseGuardrail.findMany({
+      orderBy: { sortOrder: "asc" },
+    });
+    return res.json({ data: rows });
+  } catch (error) {
+    return res.status(500).json({ error: { message: "Failed to fetch guardrails" } });
+  }
+});
+
+// POST /guardrails - Create a new guardrail row
+app.post("/guardrails", express.json(), async (req: Request, res: Response) => {
+  try {
+    const {
+      levelName,
+      colorCode,
+      minPercent,
+      maxPercent,
+      minAmount,
+      maxAmount,
+      actionRequired,
+      isActive,
+      sortOrder,
+    } = req.body as Record<string, unknown>;
+
+    if (!levelName || typeof levelName !== "string" || !levelName.trim()) {
+      return res.status(400).json({ error: { message: "levelName is required" } });
+    }
+    if (!colorCode || typeof colorCode !== "string" || !colorCode.trim()) {
+      return res.status(400).json({ error: { message: "colorCode is required" } });
+    }
+    if (!actionRequired || typeof actionRequired !== "string" || !actionRequired.trim()) {
+      return res.status(400).json({ error: { message: "actionRequired is required" } });
+    }
+
+    const row = await prisma.increaseGuardrail.create({
+      data: {
+        levelName: String(levelName).trim(),
+        colorCode: String(colorCode).trim(),
+        minPercent: minPercent !== undefined && minPercent !== null && minPercent !== "" ? Number(minPercent) : null,
+        maxPercent: maxPercent !== undefined && maxPercent !== null && maxPercent !== "" ? Number(maxPercent) : null,
+        minAmount: minAmount !== undefined && minAmount !== null && minAmount !== "" ? Number(minAmount) : null,
+        maxAmount: maxAmount !== undefined && maxAmount !== null && maxAmount !== "" ? Number(maxAmount) : null,
+        actionRequired: String(actionRequired).trim(),
+        isActive: isActive !== undefined ? Boolean(isActive) : true,
+        sortOrder: sortOrder !== undefined ? Number(sortOrder) : 0,
+      },
+    });
+
+    return res.status(201).json({ data: row });
+  } catch (error) {
+    return res.status(500).json({ error: { message: "Failed to create guardrail" } });
+  }
+});
+
+// PUT /guardrails/:id - Update a guardrail row
+app.put("/guardrails/:id", express.json(), async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const {
+      levelName,
+      colorCode,
+      minPercent,
+      maxPercent,
+      minAmount,
+      maxAmount,
+      actionRequired,
+      isActive,
+      sortOrder,
+    } = req.body as Record<string, unknown>;
+
+    const existing = await prisma.increaseGuardrail.findUnique({ where: { id } });
+    if (!existing) {
+      return res.status(404).json({ error: { message: "Guardrail not found" } });
+    }
+
+    const updated = await prisma.increaseGuardrail.update({
+      where: { id },
+      data: {
+        ...(levelName !== undefined && { levelName: String(levelName).trim() }),
+        ...(colorCode !== undefined && { colorCode: String(colorCode).trim() }),
+        ...(minPercent !== undefined && { minPercent: minPercent !== null && minPercent !== "" ? Number(minPercent) : null }),
+        ...(maxPercent !== undefined && { maxPercent: maxPercent !== null && maxPercent !== "" ? Number(maxPercent) : null }),
+        ...(minAmount !== undefined && { minAmount: minAmount !== null && minAmount !== "" ? Number(minAmount) : null }),
+        ...(maxAmount !== undefined && { maxAmount: maxAmount !== null && maxAmount !== "" ? Number(maxAmount) : null }),
+        ...(actionRequired !== undefined && { actionRequired: String(actionRequired).trim() }),
+        ...(isActive !== undefined && { isActive: Boolean(isActive) }),
+        ...(sortOrder !== undefined && { sortOrder: Number(sortOrder) }),
+      },
+    });
+
+    return res.json({ data: updated });
+  } catch (error) {
+    return res.status(500).json({ error: { message: "Failed to update guardrail" } });
+  }
+});
+
+// DELETE /guardrails/:id - Delete a guardrail row
+app.delete("/guardrails/:id", async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const existing = await prisma.increaseGuardrail.findUnique({ where: { id } });
+    if (!existing) {
+      return res.status(404).json({ error: { message: "Guardrail not found" } });
+    }
+    await prisma.increaseGuardrail.delete({ where: { id } });
+    return res.json({ success: true });
+  } catch (error) {
+    return res.status(500).json({ error: { message: "Failed to delete guardrail" } });
+  }
+});
+
+// POST /guardrails/evaluate - Evaluate an increase against active guardrails
+app.post("/guardrails/evaluate", express.json(), async (req: Request, res: Response) => {
+  try {
+    const { increasePercent, increaseAmount } = req.body as Record<string, unknown>;
+
+    if (increasePercent === undefined || increasePercent === null || increaseAmount === undefined || increaseAmount === null) {
+      return res.status(400).json({ error: { message: "increasePercent and increaseAmount are required" } });
+    }
+
+    const pct = Number(increasePercent);
+    const amt = Number(increaseAmount);
+
+    if (!Number.isFinite(pct) || !Number.isFinite(amt)) {
+      return res.status(400).json({ error: { message: "increasePercent and increaseAmount must be finite numbers" } });
+    }
+
+    const result = await evaluateGuardrails(pct, amt);
+    return res.json({ data: result });
+  } catch (error) {
+    return res.status(500).json({ error: { message: "Failed to evaluate guardrails" } });
   }
 });
 

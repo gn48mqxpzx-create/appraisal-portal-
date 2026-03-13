@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { ViewerSession } from '../utils/auth';
 import styles from './AdminConsole.module.css';
 import DataOperationsTab from './admin/DataOperationsTab';
-import MarketFrameworkTab from './admin/MarketFrameworkTab';
+import { MarketFramework } from './admin/MarketFramework';
 import SystemControlsTab from './admin/SystemControlsTab';
 
 interface AdminConsoleProps {
@@ -47,7 +47,7 @@ export function AdminConsole({ viewerSession }: AdminConsoleProps) {
             </div>
 
             {activeTab === 'data' && <DataOperationsTab viewerSession={viewerSession} />}
-            {activeTab === 'market' && <MarketFrameworkTab />}
+            {activeTab === 'market' && <MarketFramework />}
             {activeTab === 'system' && <SystemControlsTab />}
           </>
         )}

@@ -375,6 +375,75 @@
   background: #ffffff;
 }
 
+/* Market Framework Tab Navigation */
+.tabNav {
+  display: flex;
+  gap: 8px;
+  margin: 0 0 16px;
+  border-bottom: 1px solid #e5e7eb;
+  background: #ffffff;
+  border-radius: 4px 4px 0 0;
+}
+
+.filterBar {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 0;
+}
+
+.filterButton {
+  border: 1px solid #d1d5db;
+  background: #ffffff;
+  color: #374151;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 4px;
+  padding: 6px 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.filterButton:hover {
+  background: #f3f4f6;
+  border-color: #9ca3af;
+}
+
+.filterButtonActive {
+  background: #111827;
+  color: #ffffff;
+  border-color: #111827;
+}
+
+.tabContent {
+  display: grid;
+  gap: 16px;
+}
+
+.errorBox {
+  background: #fee2e2;
+  border: 1px solid #fecaca;
+  border-radius: 4px;
+  padding: 12px;
+  color: #991b1b;
+  font-size: 13px;
+}
+
+.successBox {
+  background: #dcfce7;
+  border: 1px solid #86efac;
+  border-radius: 4px;
+  padding: 12px;
+  color: #166534;
+  font-size: 13px;
+}
+
+.infoText {
+  color: #6b7280;
+  font-size: 13px;
+  padding: 12px 0;
+}
+
 @media (max-width: 640px) {
   .page {
     padding: 16px;
