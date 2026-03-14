@@ -1,4 +1,4 @@
-import { PrismaClient, WsllGateStatus } from "@prisma/client";
+import { Prisma, PrismaClient, TenureBandLabel, WsllGateStatus } from "@prisma/client";
 import {
   getLatestWsllEligibilityByStaffId,
   wsllStatusToGateStatus
@@ -7,11 +7,10 @@ import {
 const prisma = new PrismaClient();
 
 export async function computeRecommendation(caseId: string, computedBy?: string) {
-  // Fetch case with current compensation
+  // Fetch case context
   const caseRecord = await prisma.appraisalCase.findUnique({
     where: { id: caseId },
     include: {
-      compCurrent: true,
       cycle: true,
     },
   });
@@ -20,11 +19,17 @@ export async function computeRecommendation(caseId: string, computedBy?: string)
     throw new Error("Case not found");
   }
 
-  if (!caseRecord.compCurrent) {
+  const currentCompensation = await prisma.currentCompensation.findUnique({
+    where: {
+      staffId: caseRecord.staffId
+    }
+  });
+
+  if (!currentCompensation) {
     throw new Error("Current compensation not set");
   }
 
-  const currentBase = Number(caseRecord.compCurrent.baseSalary);
+  const currentBase = Number(currentCompensation.currentCompensation);
 
   // Compute tenure months from start date to now
   const startDate = new Date(caseRecord.startDate);
@@ -33,32 +38,58 @@ export async function computeRecommendation(caseId: string, computedBy?: string)
     (now.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24 * 30.44)
   );
 
-  // Find matching tenure band
-  const tenureBand = await prisma.tenureBand.findFirst({
-    where: {
-      minMonths: { lte: tenureMonths },
-      maxMonths: { gte: tenureMonths },
-    },
-  });
+  const tenureBand: TenureBandLabel =
+    tenureMonths < 12
+      ? TenureBandLabel.T1
+      : tenureMonths < 24
+        ? TenureBandLabel.T2
+        : tenureMonths < 48
+          ? TenureBandLabel.T3
+          : TenureBandLabel.T4;
 
-  // Find market benchmark for staff role and tenure band
+  // Find canonical role mapping + market matrix row
   let benchmark = null;
   let benchmarkBase = null;
   let catchupPercent = null;
 
-  if (tenureBand) {
-    benchmark = await prisma.marketBenchmark.findUnique({
+  const roleMapping = await prisma.roleAlignmentMapping.findFirst({
+    where: {
+      sourceRoleName: {
+        equals: caseRecord.staffRole,
+        mode: "insensitive"
+      }
+    },
+    include: {
+      standardizedRole: true
+    }
+  });
+
+  if (roleMapping) {
+    benchmark = await prisma.marketValueMatrix.findFirst({
       where: {
-        staffRole_tenureBandId: {
-          staffRole: caseRecord.staffRole,
-          tenureBandId: tenureBand.id,
-        },
-      },
+        tenureBand,
+        OR: [
+          ...(roleMapping.standardizedRoleId
+            ? [
+                {
+                  standardizedRoleId: roleMapping.standardizedRoleId
+                }
+              ]
+            : []),
+          {
+            roleName: {
+              equals: roleMapping.standardizedRole?.roleName ?? roleMapping.mappedRoleName,
+              mode: "insensitive"
+            }
+          }
+        ]
+      }
     });
 
     if (benchmark) {
-      benchmarkBase = Number(benchmark.baseSalary);
-      catchupPercent = benchmark.catchupPercent || 75; // Default to 75%
+      const midpoint = benchmark.minSalary.plus(benchmark.maxSalary).dividedBy(new Prisma.Decimal(2));
+      benchmarkBase = Number(midpoint);
+      catchupPercent = 75;
     }
   }
 
@@ -72,7 +103,7 @@ export async function computeRecommendation(caseId: string, computedBy?: string)
     create: {
       caseId,
       tenureMonthsUsed: tenureMonths,
-      tenureBandIdUsed: tenureBand?.id || null,
+      tenureBandIdUsed: tenureBand,
       benchmarkBaseUsed: benchmarkBase,
       catchupPercentUsed: catchupPercent,
       wsllScoreUsed: wsllScoreUsed,
@@ -80,7 +111,7 @@ export async function computeRecommendation(caseId: string, computedBy?: string)
     },
     update: {
       tenureMonthsUsed: tenureMonths,
-      tenureBandIdUsed: tenureBand?.id || null,
+      tenureBandIdUsed: tenureBand,
       benchmarkBaseUsed: benchmarkBase,
       catchupPercentUsed: catchupPercent,
       wsllScoreUsed: wsllScoreUsed,
@@ -95,12 +126,9 @@ export async function computeRecommendation(caseId: string, computedBy?: string)
   let recommendedPercent = null;
   let recommendedNewBase = currentBase;
 
-  if (wsllGateStatus !== WsllGateStatus.PASS) {
-    recommendedAmount = 0;
-    recommendedPercent = 0;
-    recommendedNewBase = currentBase;
-  } else if (benchmarkBase && currentBase < benchmarkBase) {
-    // Compute catch-up recommendation
+  if (benchmarkBase && currentBase < benchmarkBase) {
+    // Compute catch-up recommendation.
+    // WSLL now influences approval flow (RM override), not recommendation generation.
     varianceAmount = benchmarkBase - currentBase;
     variancePercent = currentBase > 0 ? varianceAmount / currentBase : 0;
     recommendedAmount = varianceAmount * ((catchupPercent || 75) / 100);

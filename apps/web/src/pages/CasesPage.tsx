@@ -19,22 +19,14 @@ type CaseRow = {
 
 const API_BASE = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
 
-// Storage keys for localStorage
-const VIEWER_ROLE_KEY = "cases_viewer_role";
-const VIEWER_NAME_KEY = "cases_viewer_name";
-
 export function CasesPage() {
   const [cases, setCases] = useState<CaseRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   
   // Viewer Identification (temporary until auth)
-  const [viewerRole, setViewerRole] = useState<string>(() => {
-    return localStorage.getItem(VIEWER_ROLE_KEY) || "SM";
-  });
-  const [viewerName, setViewerName] = useState<string>(() => {
-    return localStorage.getItem(VIEWER_NAME_KEY) || "";
-  });
+  const [viewerRole, setViewerRole] = useState<string>("SM");
+  const [viewerName, setViewerName] = useState<string>("");
 
   // Filters & Pagination
   const [search, setSearch] = useState<string>("");
@@ -45,12 +37,6 @@ export function CasesPage() {
   const [page, setPage] = useState<number>(1);
   const [pageSize] = useState<number>(20);
   const [total, setTotal] = useState<number>(0);
-
-  // Persist viewer identification to localStorage
-  useEffect(() => {
-    localStorage.setItem(VIEWER_ROLE_KEY, viewerRole);
-    localStorage.setItem(VIEWER_NAME_KEY, viewerName);
-  }, [viewerRole, viewerName]);
 
   // Auto-default Contact Type for SM/RM viewers
   useEffect(() => {

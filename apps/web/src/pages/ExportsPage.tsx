@@ -1,15 +1,17 @@
 import { useState } from "react";
+import { ViewerSession } from "../utils/auth";
 
 const API_BASE = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
 
-// Storage key for localStorage
-const VIEWER_ROLE_KEY = "cases_viewer_role";
+interface ExportsPageProps {
+  viewerSession: ViewerSession | null;
+}
 
-export function ExportsPage() {
+export function ExportsPage({ viewerSession }: ExportsPageProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const viewerRole = localStorage.getItem(VIEWER_ROLE_KEY) || "ADMIN";
+  const viewerRole = viewerSession?.role === "Admin" ? "ADMIN" : viewerSession?.role ?? null;
 
   const handleDownloadPayrollExport = async () => {
     setLoading(true);

@@ -1236,6 +1236,7 @@ model EmployeeDirectory {
   smOwnerId            String?  // SM's own HubSpot owner ID (for SM records, used to link VAs)
   rmName               String?  // Relationship Manager name (senior_success_manager from HubSpot)
   staffStartDate       DateTime?
+  isEmploymentActive   Boolean  @default(true)  // false when HubSpot marks as separated
   currentCompensation  CurrentCompensation?
   
   createdAt            DateTime @default(now())
@@ -1250,4 +1251,163 @@ model EmployeeDirectory {
   @@index([smOwnerId])
   @@index([rmName])
   @@map("employee_directory")
+}
+
+model UserScopeMapping {
+  id                       String                 @id @default(uuid())
+  userEmail                String                 @unique
+  userName                 String?
+  canonicalRole            CanonicalHierarchyRole
+  managerEmail             String?
+  managerName              String?
+  staffId                  String?
+  mappedSmEmails           String[]               @default([])
+  mappedSmNames            String[]               @default([])
+  mappedRmEmail            String?
+  mappedRmName             String?
+  scopedStaffIds           String[]               @default([])
+  scopeType                HierarchyScopeType     @default(DIRECT)
+  isActive                 Boolean                @default(true)
+  source                   HierarchyMappingSource @default(DIRECTORY_DERIVED)
+  unresolvedHierarchyReason String?
+  diagnostics              Json?
+  createdAt                DateTime               @default(now())
+  updatedAt                DateTime               @updatedAt
+
+  @@index([canonicalRole, isActive])
+  @@index([updatedAt])
+  @@map("user_scope_mappings")
+}
+
+enum CanonicalHierarchyRole {
+  SITE_LEAD
+  SUCCESS_MANAGER
+  RELATIONSHIP_MANAGER
+  REVIEWER
+  UNSCOPED
+}
+
+enum HierarchyScopeType {
+  DIRECT
+  HYBRID
+  OVERRIDE
+}
+
+enum HierarchyMappingSource {
+  DIRECTORY_DERIVED
+  ADMIN_OVERRIDE
+}
+
+// ============================================================================
+// SYNC STATE — tracks directory sync history
+// ============================================================================
+
+model SyncRecord {
+  id            String   @id @default(uuid())
+  startedAt     DateTime
+  completedAt   DateTime?
+  syncMode      String   @default("FULL")   // "FULL" | "DELTA"
+  triggeredBy   String   @default("admin")  // "admin" | "login" | "scheduled"
+  status        String   @default("RUNNING") // "RUNNING" | "SUCCESS" | "FAILED"
+  syncedCount   Int      @default(0)
+  skippedCount  Int      @default(0)
+  errorCount    Int      @default(0)
+  conflictCount Int      @default(0)
+  durationMs    Int?
+  errorMessage  String?
+
+  @@index([startedAt])
+  @@index([status])
+  @@map("sync_records")
+}
+
+// ============================================================================
+// DATA QUALITY ISSUES — anomaly flags from evaluation pipeline
+// ============================================================================
+
+model DataQualityIssue {
+  id           String    @id @default(uuid())
+  staffId      String?
+  employeeName String?
+  issueType    String    // e.g. "DUPLICATE_HUBSPOT_ID", "MISSING_SM", "NO_WSLL"
+  category     String    // "IDENTITY" | "HIERARCHY" | "ROLE" | "COMPENSATION" | "WSLL" | "APPRAISAL"
+  severity     String    @default("MEDIUM") // "HIGH" | "MEDIUM" | "LOW"
+  description  String
+  status       String    @default("OPEN")  // "OPEN" | "AUTO_RESOLVED" | "NEEDS_ADMIN_REVIEW" | "RESOLVED"
+  detectedAt   DateTime  @default(now())
+  resolvedAt   DateTime?
+  resolvedBy   String?
+  metadata     Json?
+
+  @@index([staffId])
+  @@index([issueType])
+  @@index([category])
+  @@index([severity])
+  @@index([status])
+  @@index([detectedAt])
+  @@map("data_quality_issues")
+}
+
+// ============================================================================
+// EMPLOYEE WORKING DATA — canonical pre-computed app source of truth
+// Populated after sync, compensation import, WSLL upload, and role approvals.
+// All modules read from here instead of re-deriving from raw source tables.
+// ============================================================================
+
+model EmployeeWorkingData {
+  id                   String    @id @default(cuid())
+  staffId              String    @unique
+
+  // Identity
+  hubspotContactId     String?
+  email                String?
+  fullName             String
+
+  // Employment
+  contactType          String?
+  isActiveForAppraisal Boolean   @default(true)
+  startDate            DateTime?
+  tenureMonths         Int?
+  tenureDisplay        String?
+  tenureGroup          String?   // "TENURED" | "LESS_THAN_12_MONTHS"
+
+  // Hierarchy (resolved display names — canonical)
+  successManagerName   String?
+  reportingManagerName String?
+
+  // Role (normalized via Role Library)
+  hubspotRole          String?   // raw staffRole as received from HubSpot
+  normalizedRole       String?   // approved mapped role name
+  normalizedRoleStatus String?   // "MAPPED" | "UNMAPPED" | "WEAK_MATCH"
+  standardizedRoleId   String?   // FK to StandardizedRole (denormalized for speed)
+
+  // Benchmark readiness
+  currentCompensation  Decimal?  @db.Decimal(12, 2)
+  compensationCurrency String?
+  marketMatrixMin      Decimal?  @db.Decimal(12, 2)
+  marketMatrixMax      Decimal?  @db.Decimal(12, 2)
+  marketMatrixStatus   String?   // "READY" | "MISSING_ROLE" | "MISSING_MATRIX" | "MISSING_COMP"
+
+  // WSLL
+  latestWsllAverage    Decimal?  @db.Decimal(5, 2)
+  wsllStatus           String?   // "WITH_WSLL" | "NO_WSLL"
+  wsllReason           String?   // "PASS" | "NO_DATA" | "BELOW_THRESHOLD"
+  rmApprovalRequired   Boolean   @default(false)
+
+  // Appraisal classification
+  marketPosition       String?   // "BELOW_MARKET" | "AT_OR_ABOVE_MARKET"
+  appraisalCategory    String?
+
+  // Sync metadata
+  lastSyncedAt         DateTime  @default(now())
+  lastEvaluatedAt      DateTime  @default(now())
+
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  @@index([isActiveForAppraisal])
+  @@index([normalizedRole])
+  @@index([wsllStatus])
+  @@index([marketMatrixStatus])
+  @@map("employee_working_data")
 }

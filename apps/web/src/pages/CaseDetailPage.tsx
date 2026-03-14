@@ -3,34 +3,10 @@ import { ViewerSession } from '../utils/auth';
 import { formatCompensation, formatWsll, getPhpToAudRate } from '../utils/currencyDisplay';
 import styles from './CaseDetailPage.module.css';
 
-interface Employee {
-  staff_id?: string;
-  staffId?: string;
-  full_name?: string;
-  fullName?: string;
-  email?: string;
-  staff_role?: string;
-  staffRole?: string;
-  staff_start_date?: string;
-  staffStartDate?: string;
-  // sm/rm may be a display name or HubSpot owner ID depending on the source
-  sm?: string;
-  sm_owner_id?: string;
-  rm?: string;
-  rm_name?: string;
-}
-
 interface CaseDetailPageProps {
   staffId: string;
   viewerSession: ViewerSession | null;
   onNavigateBack: () => void;
-}
-
-interface CurrentCompensationRecord {
-  staffId: string;
-  currentCompensation: number | string;
-  currency: string;
-  effectiveDate: string;
 }
 
 type BenchmarkStatus =
@@ -44,11 +20,17 @@ type BenchmarkStatus =
 interface BenchmarkSummary {
   staffId: string;
   fullName: string;
+  email: string | null;
   rawRole: string | null;
+  hubspotRole: string | null;
+  normalizedRole: string | null;
+  normalizedRoleStatus: string | null;
   standardizedRole: string | null;
   matchSource: string | null;
   confidenceScore: number | null;
   staffStartDate: string | null;
+  successManager: string | null;
+  relationshipManager: string | null;
   tenureDisplay: string | null;
   tenureBand: 'T1' | 'T2' | 'T3' | 'T4' | null;
   currentCompensation: number | string | null;
@@ -101,9 +83,40 @@ interface WorkflowData {
   wsllEligibilityStatus?: 'PASS' | 'MISSING_WSLL' | 'WSLL_BELOW_THRESHOLD';
   wsllEligibilityMessage?: string | null;
   wsllAverageWsll?: number | null;
+  appraisalClassification?: {
+    wsllStatus: 'WITH_WSLL' | 'NO_WSLL';
+    wsllReason: 'PASS' | 'NO_DATA' | 'BELOW_THRESHOLD';
+    tenureGroup: 'TENURED' | 'LESS_THAN_12_MONTHS';
+    marketPosition: 'BELOW_MARKET' | 'AT_OR_ABOVE_MARKET';
+    rmApprovalRequired: boolean;
+    appraisalCategory: string;
+  } | null;
   submittedRecommendation: WorkflowRecommendation | null;
   finalRecommendation: WorkflowRecommendation | null;
 }
+
+const formatTenureGroup = (value: 'TENURED' | 'LESS_THAN_12_MONTHS' | undefined) =>
+  value === 'TENURED' ? 'Tenured' : 'Less than 12 Months';
+
+const formatMarketPosition = (value: 'BELOW_MARKET' | 'AT_OR_ABOVE_MARKET' | undefined) =>
+  value === 'BELOW_MARKET' ? 'Below Market' : 'At or Above Market';
+
+const formatWsllStatus = (value: 'WITH_WSLL' | 'NO_WSLL' | undefined) =>
+  value === 'WITH_WSLL' ? 'With WSLL' : 'No WSLL';
+
+const formatAppraisalCategory = (value: string | undefined | null): string => {
+  if (!value) return '—';
+
+  return value
+    .split(' - ')
+    .map((part) => part
+      .toLowerCase()
+      .split('_')
+      .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+      .join(' ')
+    )
+    .join(' · ');
+};
 
 function GuardrailBadge({ result, loading }: { result: GuardrailResult | null; loading: boolean }) {
   if (loading) return <span style={{ fontSize: 12, color: '#9ca3af', fontStyle: 'italic' }}>Evaluating…</span>;
@@ -179,9 +192,7 @@ const fromCustomInputMode = (mode: string | null | undefined): CustomInputMode =
 };
 
 export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseDetailPageProps) {
-  const [employee, setEmployee] = useState<Employee | null>(null);
   const [notes, setNotes] = useState<string>('');
-  const [currentCompensation, setCurrentCompensation] = useState<CurrentCompensationRecord | null>(null);
   const [benchmark, setBenchmark] = useState<BenchmarkSummary | null>(null);
   const [benchmarkLoading, setBenchmarkLoading] = useState(false);
   const [benchmarkError, setBenchmarkError] = useState<string | null>(null);
@@ -205,40 +216,21 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
   const phpToAudRate = useMemo(() => getPhpToAudRate(), []);
 
   useEffect(() => {
-    if (viewerSession) {
-      const virtualAssistants = viewerSession.virtual_assistants || [];
-      let found = virtualAssistants.find((emp: Employee) => (emp.staff_id || emp.staffId) === staffId);
-
-      if (!found && viewerSession.success_managers) {
-        const successManagers = viewerSession.success_managers || [];
-        found = successManagers.find((emp: Employee) => (emp.staff_id || emp.staffId) === staffId);
-      }
-
-      setEmployee(found || null);
-    }
-  }, [staffId, viewerSession]);
-
-  useEffect(() => {
-    const loadCurrentCompensation = async () => {
-      try {
-        const response = await fetch(`http://localhost:3001/compensation/current/${encodeURIComponent(staffId)}`);
-        const data = await response.json();
-        setCurrentCompensation(data?.data || null);
-      } catch {
-        setCurrentCompensation(null);
-      }
-    };
-
-    void loadCurrentCompensation();
-  }, [staffId]);
-
-  useEffect(() => {
     const loadBenchmark = async () => {
       setBenchmarkLoading(true);
       setBenchmarkError(null);
 
       try {
-        const response = await fetch(`http://localhost:3001/cases/benchmark/${encodeURIComponent(staffId)}`);
+        const params = new URLSearchParams();
+        const viewerRole = viewerSession?.role === 'Admin' ? 'ADMIN' : viewerSession?.role;
+        if (viewerRole) {
+          params.set('viewerRole', viewerRole);
+        }
+        if (viewerRole && viewerRole !== 'ADMIN' && viewerSession?.viewer_email) {
+          params.set('viewerEmail', viewerSession.viewer_email);
+        }
+        const query = params.toString();
+        const response = await fetch(`http://localhost:3001/cases/benchmark/${encodeURIComponent(staffId)}${query ? `?${query}` : ''}`);
         const payload = await response.json().catch(() => ({}));
 
         if (!response.ok) {
@@ -257,14 +249,23 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
     };
 
     void loadBenchmark();
-  }, [staffId]);
+  }, [staffId, viewerSession]);
 
   const loadWorkflow = async () => {
     setWorkflowLoading(true);
     setWorkflowError(null);
 
     try {
-      const response = await fetch(`http://localhost:3001/cases/by-staff/${encodeURIComponent(staffId)}/workflow`);
+      const params = new URLSearchParams();
+      const viewerRole = viewerSession?.role === 'Admin' ? 'ADMIN' : viewerSession?.role;
+      if (viewerRole) {
+        params.set('viewerRole', viewerRole);
+      }
+      if (viewerRole && viewerRole !== 'ADMIN' && viewerSession?.viewer_email) {
+        params.set('viewerEmail', viewerSession.viewer_email);
+      }
+      const query = params.toString();
+      const response = await fetch(`http://localhost:3001/cases/by-staff/${encodeURIComponent(staffId)}/workflow${query ? `?${query}` : ''}`);
       const payload = await response.json().catch(() => ({}));
 
       if (!response.ok) {
@@ -284,7 +285,7 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
 
   useEffect(() => {
     void loadWorkflow();
-  }, [staffId]);
+  }, [staffId, viewerSession]);
 
   useEffect(() => {
     if (!workflow?.submittedRecommendation) {
@@ -391,11 +392,15 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
   const isRejected = workflow?.status === 'REVIEW_REJECTED';
   const managerCanEdit = !isSubmitted && !isApprovedState;
   const wsllEligibilityStatus = workflow?.wsllEligibilityStatus ?? 'MISSING_WSLL';
-  const wsllRecommendationAllowed = wsllEligibilityStatus === 'PASS';
   const wsllBlockerMessage = workflow?.wsllEligibilityMessage
     || (wsllEligibilityStatus === 'WSLL_BELOW_THRESHOLD'
-      ? 'Employee is not eligible for appraisal because average WSLL is below 2.8.'
-      : 'WSLL data is required before a recommendation can be created.');
+      ? 'Average WSLL is below 2.8.'
+      : 'WSLL data is not available.');
+  const classification = workflow?.appraisalClassification ?? null;
+  const rmOverrideRequired = classification?.rmApprovalRequired ?? false;
+  const rmOverrideMessage = rmOverrideRequired
+    ? 'RM override required before final approval.'
+    : 'Standard Review';
 
   const recommendationBlockerMessages: Partial<Record<BenchmarkStatus, string>> = {
     MISSING_ROLE_MAPPING: 'Role must be mapped before a recommendation can be created.',
@@ -552,13 +557,12 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
   const canSubmitForReview = useMemo(() => {
     if (!managerCanEdit) return false;
     if (!benchmarkReady) return false;
-    if (!wsllRecommendationAllowed) return false;
     if (guardrailLoading || !guardrailResult) return false;
     if (selectedRecommendation === 'custom' && !customConfirmed) return false;
     if (guardrailResult.guardrailLevel === 'Red' || guardrailResult.guardrailLevel === 'Unknown') return false;
     if (guardrailResult.guardrailLevel === 'Yellow') return justificationText.trim().length > 0;
     return true;
-  }, [benchmarkReady, customConfirmed, guardrailLoading, guardrailResult, justificationText, managerCanEdit, selectedRecommendation, wsllRecommendationAllowed]);
+  }, [benchmarkReady, customConfirmed, guardrailLoading, guardrailResult, justificationText, managerCanEdit, selectedRecommendation]);
 
   const approvedSummary = workflow?.finalRecommendation || workflow?.submittedRecommendation;
 
@@ -657,7 +661,7 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
     }
   };
 
-  if (!employee && !benchmarkLoading && !benchmark) {
+  if (!benchmarkLoading && !benchmark && !workflow) {
     return (
       <div className={styles.container}>
         <div className={styles.innerContainer}>
@@ -670,22 +674,14 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
     );
   }
 
-  const fullName = employee?.full_name || employee?.fullName || benchmark?.fullName || '—';
-  const email = employee?.email || '—';
-  const role = employee?.staff_role || employee?.staffRole || benchmark?.rawRole || '—';
-  const startDate = employee?.staff_start_date || employee?.staffStartDate || benchmark?.staffStartDate || undefined;
+  const fullName = workflow?.fullName || benchmark?.fullName || '—';
+  const email = benchmark?.email || '—';
+  const role = benchmark?.rawRole || '—';
+  const startDate = benchmark?.staffStartDate || undefined;
   const tenure = calculateTenure(startDate);
   const formattedStartDate = formatDate(startDate);
-  // SM fallback chain:
-  // 1. workflow.successManager — resolved by backend (intake name → directory lookup)
-  // 2. employee.sm — direct field if present in session data
-  // 3. employee.sm_owner_id — raw HubSpot owner ID (last resort, not a display name)
-  const successManager = workflow?.successManager || employee?.sm || employee?.sm_owner_id || '—';
-  // RM fallback chain:
-  // 1. workflow.relationshipManager — resolved by backend
-  // 2. employee.rm — direct field from session directory data
-  // 3. employee.rm_name — alternate field name
-  const reportingManager = workflow?.relationshipManager || employee?.rm || employee?.rm_name || '—';
+  const successManager = workflow?.successManager || benchmark?.successManager || '—';
+  const reportingManager = workflow?.relationshipManager || benchmark?.relationshipManager || '—';
 
   return (
     <div className={styles.container}>
@@ -717,8 +713,20 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
                 <div className={styles.fieldValue}>{email}</div>
               </div>
               <div className={styles.profileField}>
-                <label className={styles.fieldLabel}>Role</label>
-                <div className={styles.fieldValue}>{role}</div>
+                <label className={styles.fieldLabel}>HubSpot Role</label>
+                <div className={styles.fieldValue}>{benchmark?.hubspotRole || benchmark?.rawRole || '—'}</div>
+              </div>
+              <div className={styles.profileField}>
+                <label className={styles.fieldLabel}>Normalized Role</label>
+                <div className={styles.fieldValue}>
+                  {benchmark?.normalizedRole
+                    ? <>
+                        {benchmark.normalizedRole}
+                        {benchmark.normalizedRoleStatus === 'UNMAPPED' && <span style={{ marginLeft: 6, fontSize: '0.75rem', color: '#b45309', background: '#fef3c7', padding: '1px 6px', borderRadius: 4 }}>Unmapped</span>}
+                        {benchmark.normalizedRoleStatus === 'WEAK_MATCH' && <span style={{ marginLeft: 6, fontSize: '0.75rem', color: '#92400e', background: '#fde68a', padding: '1px 6px', borderRadius: 4 }}>Weak Match</span>}
+                      </>
+                    : '—'}
+                </div>
               </div>
               <div className={styles.profileField}>
                 <label className={styles.fieldLabel}>Start Date</label>
@@ -746,11 +754,11 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
             <div className={styles.compensationGrid}>
               <div className={styles.compensationField}>
                 <label className={styles.fieldLabel}>Current Compensation</label>
-                <div className={styles.fieldValue}>{formatCurrency(currentCompensation?.currentCompensation, currentCompensation?.currency)}</div>
+                <div className={styles.fieldValue}>{formatCurrency(benchmark?.currentCompensation, benchmark?.currency)}</div>
               </div>
               <div className={styles.compensationField}>
                 <label className={styles.fieldLabel}>Effective Date</label>
-                <div className={styles.fieldValue}>{formatDate(currentCompensation?.effectiveDate)}</div>
+                <div className={styles.fieldValue}>{formatDate(benchmark?.effectiveDate)}</div>
               </div>
             </div>
           </div>
@@ -789,14 +797,35 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
                   </div>
                 )}
 
-                {benchmarkReady && !wsllRecommendationAllowed && (
-                  <div className={styles.warningBanner}>
-                    {wsllBlockerMessage}
-                    {workflow?.wsllAverageWsll != null && (
-                      <span style={{ marginLeft: '8px', fontWeight: 600 }}>
-                        (Avg WSLL: {formatWsll(workflow.wsllAverageWsll)})
+                {classification ? (
+                  <div className={styles.classificationRibbon}>
+                    <div className={styles.classificationRow}>
+                      <span className={`${styles.classificationChip} ${classification.wsllStatus === 'NO_WSLL' ? styles.chipAmber : styles.chipGreen}`}>
+                        {formatWsllStatus(classification.wsllStatus)}
                       </span>
-                    )}
+                      <span className={`${styles.classificationChip} ${styles.chipNeutral}`}>
+                        {formatTenureGroup(classification.tenureGroup)}
+                      </span>
+                      <span className={`${styles.classificationChip} ${classification.marketPosition === 'BELOW_MARKET' ? styles.chipBlue : styles.chipNeutral}`}>
+                        {formatMarketPosition(classification.marketPosition)}
+                      </span>
+                      <span className={`${styles.classificationChip} ${classification.rmApprovalRequired ? styles.chipAmber : styles.chipGreen}`}>
+                        {classification.rmApprovalRequired ? 'RM Override Required' : 'Standard Review'}
+                      </span>
+                    </div>
+                    <div className={styles.classificationCategory}>
+                      <span className={styles.classificationCategoryLabel}>Category</span>
+                      <span className={styles.classificationCategoryValue}>{formatAppraisalCategory(classification.appraisalCategory)}</span>
+                    </div>
+                  </div>
+                ) : null}
+
+                {benchmarkReady && rmOverrideRequired && (
+                  <div className={styles.warningBanner}>
+                    {rmOverrideMessage}
+                    <span style={{ marginLeft: '8px', fontWeight: 600 }}>
+                      ({wsllBlockerMessage}{workflow?.wsllAverageWsll != null ? ` Avg WSLL: ${formatWsll(workflow.wsllAverageWsll)}` : ''})
+                    </span>
                   </div>
                 )}
 
@@ -873,10 +902,10 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
                           <button
                             key={option}
                             type="button"
-                            disabled={!benchmarkReady || !managerCanEdit || !wsllRecommendationAllowed}
+                            disabled={!benchmarkReady || !managerCanEdit}
                             className={`${styles.recommendationCard} ${cardClass} ${selectedRecommendation === option ? styles.recommendationCardSelected : ''}`}
                             onClick={() => setSelectedRecommendation(option)}
-                            style={{ opacity: benchmarkReady && managerCanEdit && wsllRecommendationAllowed ? 1 : 0.45, cursor: benchmarkReady && managerCanEdit && wsllRecommendationAllowed ? 'pointer' : 'not-allowed' }}
+                            style={{ opacity: benchmarkReady && managerCanEdit ? 1 : 0.45, cursor: benchmarkReady && managerCanEdit ? 'pointer' : 'not-allowed' }}
                           >
                             <p className={styles.recommendationName}>{name}</p>
                             <p className={styles.recommendationMetric}>Target: {formatCurrency(recommendation.targetSalary, benchmark.currency)}</p>
@@ -888,7 +917,7 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
                       })}
                     </div>
 
-                    {selectedRecommendation === 'custom' && benchmarkReady && managerCanEdit && wsllRecommendationAllowed ? (
+                    {selectedRecommendation === 'custom' && benchmarkReady && managerCanEdit ? (
                       <div className={styles.customInputWrap}>
                         <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
                           {([
@@ -933,7 +962,7 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
                           </p>
                         ) : null}
                         {!customConfirmed ? (
-                          <button type="button" disabled={recommendations.custom.targetSalary === null || !wsllRecommendationAllowed} onClick={() => void handleConfirmCustom()} className={styles.inlineActionButton}>
+                          <button type="button" disabled={recommendations.custom.targetSalary === null} onClick={() => void handleConfirmCustom()} className={styles.inlineActionButton}>
                             Confirm Custom Recommendation
                           </button>
                         ) : (
@@ -955,7 +984,7 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
                       </div>
                     ) : null}
 
-                    {(selectedRecommendation !== 'custom' || customConfirmed) && managerCanEdit && wsllRecommendationAllowed ? (
+                    {(selectedRecommendation !== 'custom' || customConfirmed) && managerCanEdit ? (
                       <div style={{ marginTop: 20, display: 'flex', flexDirection: 'column', gap: 12 }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
                           <span style={{ fontSize: 13, fontWeight: 600, color: '#374151' }}>Guardrail:</span>
@@ -978,7 +1007,7 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
 
                         {guardrailResult?.guardrailLevel === 'Red' ? (
                           <div className={styles.benchmarkNotice}>
-                            <p className={styles.benchmarkNoticeText}>This increase exceeds the Red guardrail threshold. Normal submission is disabled.</p>
+                            <p className={styles.benchmarkNoticeText}>This increase exceeds the threshold. Normal submission is disabled.</p>
                           </div>
                         ) : null}
                       </div>

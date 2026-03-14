@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from "express";
 import { hubspotFetch, getHubSpotToken } from "./services/hubspotClient";
 import { requireAuth } from "./auth";
+import { resolveViewerHierarchy } from "./services/hierarchyResolutionService";
 
 const router = Router();
 
@@ -450,55 +451,94 @@ router.get("/rm/:rm", async (req: Request, res: Response) => {
  */
 router.get("/me", requireAuth, async (req: Request, res: Response) => {
   try {
-    // Check for HubSpot token
-    try {
-      getHubSpotToken();
-    } catch {
-      return res.status(500).json({
-        error: "Missing HUBSPOT_API_TOKEN. Please set HUBSPOT_API_TOKEN in the API environment."
-      });
-    }
-
     if (!req.viewer) {
       return res.status(401).json({ error: "Not authenticated" });
     }
 
-    const { viewer_type, sm_owner_id, rm_name, staff_id, viewer_email } = req.viewer;
-    const includeNonEligible = req.query.include_non_eligible === "true";
-    const includeSeparated = req.query.include_separated === "true";
+    const viewerRole = req.viewer.viewer_type === "SM" ? "SUCCESS_MANAGER" : req.viewer.viewer_type === "RM" ? "RELATIONSHIP_MANAGER" : "UNSCOPED";
+    const hierarchy = await resolveViewerHierarchy({
+      email: req.viewer.viewer_email,
+      role: viewerRole,
+      name: req.viewer.viewer_full_name,
+      id: req.viewer.staff_id
+    });
 
-    const viewerContext = {
-      staff_id: staff_id || null,
-      viewer_email: viewer_email || null
-    };
-
-    if (viewer_type === "SM") {
-      if (!sm_owner_id) {
-        return res.status(400).json({ error: "SM owner ID not found in viewer context" });
-      }
-      const result = await fetchSmScope(sm_owner_id, {
-        includeNonEligible,
-        includeSeparated,
-        viewer: viewerContext
+    if (hierarchy.scopedRole !== "SUCCESS_MANAGER" && hierarchy.scopedRole !== "RELATIONSHIP_MANAGER") {
+      return res.status(403).json({
+        error: "Viewer type UNSCOPED has no scope access",
+        viewer_type: req.viewer.viewer_type,
+        unresolvedHierarchyReason: hierarchy.unresolvedHierarchyReason,
+        diagnostics: hierarchy.diagnostics
       });
-      return res.status(200).json(result);
     }
 
-    if (viewer_type === "RM") {
-      if (!rm_name) {
-        return res.status(400).json({ error: "RM name not found in viewer context" });
-      }
-      const result = await fetchRmScope(rm_name, {
-        includeNonEligible,
-        includeSeparated,
-        viewer: viewerContext
+    if (hierarchy.scopedRole === "SUCCESS_MANAGER") {
+      return res.status(200).json({
+        viewer_type: "SM",
+        viewer_email: req.viewer.viewer_email,
+        viewer_name: hierarchy.resolvedViewerRecord?.fullName || req.viewer.viewer_full_name,
+        count: hierarchy.vaRecords.length,
+        raw_count: hierarchy.vaRecords.length,
+        staff: hierarchy.vaRecords.map((record) => ({
+          hubspot_id: "",
+          staff_id: record.staffId,
+          full_name: record.fullName,
+          email: record.email,
+          staff_role: record.staffRole,
+          contact_type: record.contactType,
+          sm_owner_id: record.smName ?? "",
+          rm: record.rmName ?? ""
+        })),
+        unresolvedHierarchyReason: hierarchy.unresolvedHierarchyReason,
+        diagnostics: hierarchy.diagnostics
       });
-      return res.status(200).json(result);
     }
 
-    return res.status(403).json({
-      error: "Viewer type UNSCOPED has no scope access",
-      viewer_type
+    const groupedBySm = new Map<string, Array<{
+      hubspot_id: string;
+      staff_id: string;
+      full_name: string;
+      email: string;
+      staff_role: string;
+      contact_type: string;
+      sm_owner_id: string;
+      rm: string;
+    }>>();
+
+    for (const vaRecord of hierarchy.vaRecords) {
+      const smOwnerId = vaRecord.smName ?? "(unassigned)";
+      if (!groupedBySm.has(smOwnerId)) {
+        groupedBySm.set(smOwnerId, []);
+      }
+
+      groupedBySm.get(smOwnerId)!.push({
+        hubspot_id: "",
+        staff_id: vaRecord.staffId,
+        full_name: vaRecord.fullName,
+        email: vaRecord.email,
+        staff_role: vaRecord.staffRole,
+        contact_type: vaRecord.contactType,
+        sm_owner_id: vaRecord.smName ?? "",
+        rm: vaRecord.rmName ?? ""
+      });
+    }
+
+    const smGroups = Array.from(groupedBySm.entries())
+      .map(([smOwnerId, staff]) => ({
+        sm_owner_id: smOwnerId,
+        count: staff.length,
+        staff
+      }))
+      .sort((a, b) => a.sm_owner_id.localeCompare(b.sm_owner_id));
+
+    return res.status(200).json({
+      viewer_type: "RM",
+      rm: hierarchy.resolvedViewerRecord?.fullName || req.viewer.viewer_full_name,
+      total_staff: hierarchy.vaRecords.length,
+      raw_total_staff: hierarchy.vaRecords.length,
+      sm_groups: smGroups,
+      unresolvedHierarchyReason: hierarchy.unresolvedHierarchyReason,
+      diagnostics: hierarchy.diagnostics
     });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : "Unknown error";

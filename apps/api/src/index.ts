@@ -27,6 +27,7 @@ import {
   type WsllFlagCode
 } from "./intake/csvNormalize";
 import {
+  getCaseWorkflowByCaseId,
   getCaseWorkflowByStaffId,
   getReviewQueue,
   reviewRecommendation,
@@ -34,8 +35,25 @@ import {
   submitRecommendationForReview
 } from "./services/recommendationReviewService";
 import { ALLOWED_APPRAISAL_CONTACT_TYPES, getScopedCaseWhere, getScopedEmployees } from "./services/employeeScopeService";
+import { resolveViewerHierarchy } from "./services/hierarchyResolutionService";
 import { getLatestWsllEligibilityByStaffIds } from "./services/wsllEligibilityService";
-import { getSMDirectory, resolveManagerNamesForCases } from "./services/employeeDirectoryService";
+import { getSMDirectory, resolveManagerNamesForCases, getLastSyncRecord } from "./services/employeeDirectoryService";
+import { resolveViewerByEmail, ViewerNotFoundError } from "./services/viewerResolutionService";
+import {
+  getAppraisalCategoryBreakdownForCases,
+  getAppraisalClassificationForCase,
+  getAppraisalClassificationForCases
+} from "./services/appraisalClassificationService";
+import { listDataQualityIssues, getDataQualitySummary, updateIssueStatus, runDataQualityChecks } from "./services/dataQualityService";
+import {
+  getWorkingData,
+  getOrBuildWorkingData,
+  getWorkingDataBatch,
+  refreshAllWorkingData,
+  rebuildWorkingDataForEmployee,
+  refreshWorkingDataForEmployees,
+  workingDataToClassification
+} from "./services/employeeWorkingDataService";
 
 const app = express();
 const port = Number(process.env.API_PORT ?? 3001);
@@ -730,6 +748,8 @@ const getDashboardSummary = async (req: Request, res: Response) => {
       });
     }
 
+    const hierarchyDebug = await getHierarchyDebugForViewer(req, viewer);
+
     const scopedWhere = await getScopedCaseWhere(viewer, {
       cycleId: activeCycle.id,
       includeRemoved: false
@@ -753,6 +773,7 @@ const getDashboardSummary = async (req: Request, res: Response) => {
     const scopedCases = await prisma.appraisalCase.findMany({
       where: scopedWhere,
       select: {
+        id: true,
         staffId: true,
         status: true
       }
@@ -774,6 +795,13 @@ const getDashboardSummary = async (req: Request, res: Response) => {
     const approved = scopedCases.filter((item) => DASHBOARD_APPROVED_STATUSES.includes(item.status)).length;
     const rejected = scopedCases.filter((item) => DASHBOARD_REJECTED_STATUSES.includes(item.status)).length;
     const submitted = scopedCases.filter((item) => submittedStatuses.has(item.status)).length;
+    const classificationBreakdown = await getAppraisalCategoryBreakdownForCases(scopedCases.map((item) => item.id));
+
+    logHierarchyModuleDebug("dashboard.summary", viewer, {
+      scopedCaseCount: scopedCases.length,
+      eligibleCount: eligibleStaffIds.length,
+      activeCycleId: activeCycle.id
+    });
 
     return res.status(200).json({
       success: true,
@@ -784,7 +812,9 @@ const getDashboardSummary = async (req: Request, res: Response) => {
         forReview,
         approved,
         rejected,
-        activeCycleId: activeCycle.id
+        activeCycleId: activeCycle.id,
+        classification_breakdown: classificationBreakdown,
+        hierarchy_debug: hierarchyDebug
       }
     });
   } catch (error) {
@@ -951,12 +981,6 @@ app.get("/intake/derived-options", (_req, res) => {
   });
 });
 
-// Helper: Normalize name for matching (trim, lowercase, collapse multiple spaces)
-const normalizeName = (name: string | null | undefined): string => {
-  if (!name) return "";
-  return name.trim().toLowerCase().replace(/\s+/g, " ");
-};
-
 // Helper: Extract viewer identification from req.user or query params
 const getViewer = (req: Request): { name: string; role: string; email: string; id: string } | null => {
   // Priority 1: req.user (from future auth implementation)
@@ -984,10 +1008,9 @@ const getViewer = (req: Request): { name: string; role: string; email: string; i
     return null;
   }
 
-  const hasScopedIdentity = Boolean(viewerName || viewerEmail || viewerId);
+  const requiresExactEmail = viewerRole === "SM" || viewerRole === "SUCCESS_MANAGER" || viewerRole === "RM" || viewerRole === "REVIEWER";
 
-  // For scoped roles, at least one identity field is required
-  if ((viewerRole === "SM" || viewerRole === "SUCCESS_MANAGER" || viewerRole === "RM" || viewerRole === "REVIEWER") && !hasScopedIdentity) {
+  if (requiresExactEmail && !viewerEmail) {
     return null;
   }
 
@@ -999,13 +1022,141 @@ const getViewer = (req: Request): { name: string; role: string; email: string; i
   };
 };
 
+const resolveScopedViewer = async (
+  req: Request
+): Promise<{ name: string; role: string; email: string; id: string } | null> => {
+  const viewer = getViewer(req);
+  if (!viewer) {
+    return null;
+  }
+
+  const normalizedRole = viewer.role.trim().toUpperCase();
+  if (normalizedRole === "ADMIN" || normalizedRole === "SITE_LEAD") {
+    return {
+      ...viewer,
+      role: normalizedRole,
+      email: viewer.email.trim().toLowerCase()
+    };
+  }
+
+  const normalizedEmail = viewer.email.trim().toLowerCase();
+  if (!normalizedEmail) {
+    return null;
+  }
+
+  let resolvedViewer;
+  try {
+    resolvedViewer = await resolveViewerByEmail(normalizedEmail);
+  } catch (error) {
+    if (error instanceof ViewerNotFoundError) {
+      return null;
+    }
+    throw error;
+  }
+
+  if (normalizedRole === "REVIEWER") {
+    return {
+      role: "REVIEWER",
+      email: resolvedViewer.normalizedEmail,
+      name: resolvedViewer.fullName,
+      id: resolvedViewer.employeeRecord?.staffId || resolvedViewer.rmOwner?.id || ""
+    };
+  }
+
+  if (resolvedViewer.scopedRole === "SUCCESS_MANAGER") {
+    return {
+      role: "SM",
+      email: resolvedViewer.normalizedEmail,
+      name: resolvedViewer.fullName,
+      id: resolvedViewer.employeeRecord?.staffId || ""
+    };
+  }
+
+  if (resolvedViewer.scopedRole === "RELATIONSHIP_MANAGER") {
+    return {
+      role: "RM",
+      email: resolvedViewer.normalizedEmail,
+      name: resolvedViewer.fullName,
+      id: resolvedViewer.employeeRecord?.staffId || resolvedViewer.rmOwner?.id || ""
+    };
+  }
+
+  return null;
+};
+
+const logHierarchyModuleDebug = (
+  moduleName: string,
+  viewer: { name: string; role: string; email: string; id: string },
+  payload: Record<string, unknown>
+) => {
+  if (process.env.HIERARCHY_DEBUG !== "true") {
+    return;
+  }
+
+  console.log(
+    "[HierarchyDebug]",
+    JSON.stringify({
+      module: moduleName,
+      viewerEmail: viewer.email || null,
+      viewerRole: viewer.role,
+      ...payload
+    })
+  );
+};
+
+const shouldExposeHierarchyDebug = (req: Request, viewerRole: string): boolean => {
+  if (req.query.debugHierarchy === "true") {
+    return true;
+  }
+
+  return viewerRole.trim().toUpperCase() === "ADMIN" || viewerRole.trim().toUpperCase() === "SITE_LEAD";
+};
+
+const getHierarchyDebugForViewer = async (
+  req: Request,
+  viewer: { name: string; role: string; email: string; id: string }
+) => {
+  if (!shouldExposeHierarchyDebug(req, viewer.role)) {
+    return null;
+  }
+
+  const scopedRole = viewer.role.trim().toUpperCase() === "SM"
+    ? "SUCCESS_MANAGER"
+    : viewer.role.trim().toUpperCase() === "RM"
+      ? "RELATIONSHIP_MANAGER"
+      : viewer.role;
+
+  try {
+    const hierarchy = await resolveViewerHierarchy({
+      role: scopedRole,
+      email: viewer.email,
+      name: viewer.name,
+      id: viewer.id
+    });
+
+    return {
+      scopedRole: hierarchy.scopedRole,
+      scopeCount: hierarchy.scopedStaffIds.length,
+      unresolvedHierarchyReason: hierarchy.unresolvedHierarchyReason,
+      diagnostics: hierarchy.diagnostics
+    };
+  } catch (error) {
+    return {
+      scopedRole: "UNSCOPED",
+      scopeCount: 0,
+      unresolvedHierarchyReason: error instanceof Error ? error.message : "HIERARCHY_DEBUG_FAILED",
+      diagnostics: null
+    };
+  }
+};
+
 // GET /cases - List cases with pagination, filtering, and access control
 app.get("/cases", async (req: Request, res: Response) => {
   try {
     const activeCycle = await ensureActiveCycle();
 
     // Get viewer identification
-    const viewer = getViewer(req);
+    const viewer = await resolveScopedViewer(req);
     if (!viewer) {
       return res.status(400).json({
         success: false,
@@ -1014,6 +1165,8 @@ app.get("/cases", async (req: Request, res: Response) => {
         }
       });
     }
+
+    const hierarchyDebug = await getHierarchyDebugForViewer(req, viewer);
 
     // Pagination parameters (safe defaults)
     const page = Math.max(1, parseInt(req.query.page as string) || 1);
@@ -1036,7 +1189,23 @@ app.get("/cases", async (req: Request, res: Response) => {
       pageSize
     });
 
-    const latestWsllByStaff = await getLatestWsllEligibilityByStaffIds(cases.map((c) => c.staffId));
+    const staffIds = [...new Set(cases.map((c) => c.staffId))];
+    const latestWsllByStaff = await getLatestWsllEligibilityByStaffIds(staffIds);
+    const classificationByCaseId = await getAppraisalClassificationForCases(cases.map((c) => c.id));
+    const currentCompensations = await prisma.currentCompensation.findMany({
+      where: {
+        staffId: {
+          in: staffIds
+        }
+      },
+      select: {
+        staffId: true,
+        currentCompensation: true
+      }
+    });
+    const currentCompensationByStaffId = new Map(
+      currentCompensations.map((row) => [row.staffId, Number(row.currentCompensation)])
+    );
 
     // Batch-resolve SM and RM display names using fallback chain
     const managerNamesMap = await resolveManagerNamesForCases(
@@ -1048,7 +1217,7 @@ app.get("/cases", async (req: Request, res: Response) => {
     );
 
     const items = cases.map((c) => {
-      const currentBase = Number(c.compCurrent?.baseSalary || 0);
+      const currentBase = currentCompensationByStaffId.get(c.staffId) ?? Number(c.compCurrent?.baseSalary || 0);
       const submittedTargetSalary =
         c.recommendation?.submittedTargetSalary !== null && c.recommendation?.submittedTargetSalary !== undefined
           ? Number(c.recommendation.submittedTargetSalary)
@@ -1088,6 +1257,7 @@ app.get("/cases", async (req: Request, res: Response) => {
       };
 
       const resolvedManagers = managerNamesMap.get(c.staffId);
+      const classification = classificationByCaseId.get(c.id) ?? null;
 
       return {
         id: c.id,
@@ -1104,9 +1274,18 @@ app.get("/cases", async (req: Request, res: Response) => {
         wsll_gate_status: wsllEligibility.status,
         wsll_average: wsllEligibility.averageWsll,
         wsll_blocker_message: wsllEligibility.blockerMessage,
+        appraisal_classification: classification,
         proposed_increase_amount: finalIncreaseAmount ?? submittedIncreaseAmount,
         final_new_base: finalNewBase
       };
+    });
+
+    logHierarchyModuleDebug("cases.list", viewer, {
+      total,
+      returnedCount: items.length,
+      page,
+      pageSize,
+      activeCycleId: activeCycle.id
     });
 
     return res.status(200).json({
@@ -1115,7 +1294,8 @@ app.get("/cases", async (req: Request, res: Response) => {
         items,
         total,
         page,
-        pageSize
+        pageSize,
+        hierarchy_debug: hierarchyDebug
       }
     });
   } catch (error) {
@@ -1138,7 +1318,59 @@ app.get("/cases/by-staff/:staffId/workflow", async (req: Request, res: Response)
       });
     }
 
-    const data = await getCaseWorkflowByStaffId(staffId);
+    const viewer = await resolveScopedViewer(req);
+    if (!viewer) {
+      const data = await getCaseWorkflowByStaffId(staffId);
+      return res.status(200).json({ success: true, data });
+    }
+
+    const activeCycle = await ensureActiveCycle();
+    const scopedWhere = await getScopedCaseWhere(viewer, {
+      cycleId: activeCycle.id,
+      includeRemoved: false
+    });
+
+    if (!scopedWhere) {
+      return res.status(404).json({
+        success: false,
+        error: { message: "Case not found" }
+      });
+    }
+
+    const hierarchyDebug = await getHierarchyDebugForViewer(req, viewer);
+
+    const scopedCase = await prisma.appraisalCase.findFirst({
+      where: {
+        AND: [
+          scopedWhere,
+          {
+            cycleId: activeCycle.id,
+            staffId
+          }
+        ]
+      },
+      select: {
+        id: true
+      },
+      orderBy: {
+        createdAt: "desc"
+      }
+    });
+
+    if (!scopedCase) {
+      return res.status(404).json({
+        success: false,
+        error: { message: "Case not found" }
+      });
+    }
+
+    const data = await getCaseWorkflowByCaseId(scopedCase.id);
+
+    logHierarchyModuleDebug("cases.workflow", viewer, {
+      staffId,
+      caseId: scopedCase.id,
+      activeCycleId: activeCycle.id
+    });
 
     return res.status(200).json({ success: true, data });
   } catch (error) {
@@ -1151,7 +1383,7 @@ app.get("/cases/by-staff/:staffId/workflow", async (req: Request, res: Response)
 
 app.get("/review-queue", async (req: Request, res: Response) => {
   try {
-    const viewer = getViewer(req);
+    const viewer = await resolveScopedViewer(req);
     if (!viewer) {
       return res.status(400).json({
         success: false,
@@ -1161,8 +1393,19 @@ app.get("/review-queue", async (req: Request, res: Response) => {
       });
     }
 
+    const hierarchyDebug = await getHierarchyDebugForViewer(req, viewer);
+
     const items = await getReviewQueue(viewer);
-    return res.status(200).json({ success: true, data: items });
+
+    logHierarchyModuleDebug("review.queue", viewer, {
+      reviewQueueCount: items.length
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: items,
+      hierarchy_debug: hierarchyDebug
+    });
   } catch (error) {
     return res.status(500).json({
       success: false,
@@ -1184,12 +1427,23 @@ app.get("/cases/benchmark/:staffId", async (req: Request, res: Response) => {
       });
     }
 
-    const employee = await prisma.employeeDirectory.findUnique({
-      where: { staffId },
-      include: { currentCompensation: true }
+    const viewer = await resolveScopedViewer(req);
+    if (!viewer) {
+      return res.status(400).json({
+        success: false,
+        error: {
+          message: "Missing required query parameters: viewerRole and viewerEmail"
+        }
+      });
+    }
+
+    const activeCycle = await ensureActiveCycle();
+    const scopedWhere = await getScopedCaseWhere(viewer, {
+      cycleId: activeCycle.id,
+      includeRemoved: false
     });
 
-    if (!employee) {
+    if (!scopedWhere) {
       return res.status(404).json({
         success: false,
         error: {
@@ -1198,138 +1452,85 @@ app.get("/cases/benchmark/:staffId", async (req: Request, res: Response) => {
       });
     }
 
-    const rawRole = employee.staffRole?.trim() || null;
-    const basePayload = {
-      staffId: employee.staffId,
-      fullName: employee.fullName,
-      rawRole,
-      standardizedRole: null as string | null,
-      matchSource: null as string | null,
-      confidenceScore: null as number | null,
-      staffStartDate: employee.staffStartDate,
-      tenureDisplay: null as string | null,
-      tenureBand: null as TenureBandLabel | null,
-      currentCompensation: formatDecimalMoney(employee.currentCompensation?.currentCompensation),
-      currency: employee.currentCompensation?.currency ?? null,
-      effectiveDate: employee.currentCompensation?.effectiveDate ?? null,
-      marketMin: null as string | null,
-      marketMax: null as string | null,
-      marketMidpoint: null as string | null,
-      gapToMidpoint: null as string | null,
-      benchmarkStatus: "MISSING_ROLE_MAPPING" as BenchmarkStatus
-    };
-
-    if (!rawRole) {
-      return res.status(200).json({ success: true, data: basePayload });
-    }
-
-    const mapping = await prisma.roleAlignmentMapping.findFirst({
+    const caseRecord = await prisma.appraisalCase.findFirst({
       where: {
-        sourceRoleName: {
-          equals: rawRole,
-          mode: "insensitive"
-        }
-      },
-      include: {
-        standardizedRole: true
-      }
-    });
-
-    if (!mapping) {
-      return res.status(200).json({ success: true, data: basePayload });
-    }
-
-    const resolvedWithMapping = {
-      ...basePayload,
-      standardizedRole: mapping.standardizedRole?.roleName ?? mapping.mappedRoleName ?? null,
-      matchSource: mapping.matchSource,
-      confidenceScore: formatDecimalScore(mapping.confidenceScore)
-    };
-
-    if (!mapping.standardizedRoleId || !mapping.standardizedRole) {
-      return res.status(200).json({
-        success: true,
-        data: {
-          ...resolvedWithMapping,
-          benchmarkStatus: "MISSING_STANDARDIZED_ROLE" as BenchmarkStatus
-        }
-      });
-    }
-
-    const tenure = resolveTenureBenchmark(employee.staffStartDate);
-    const resolvedWithTenure = {
-      ...resolvedWithMapping,
-      tenureDisplay: tenure.tenureDisplay,
-      tenureBand: tenure.tenureBand
-    };
-
-    if (!tenure.tenureBand) {
-      return res.status(200).json({
-        success: true,
-        data: {
-          ...resolvedWithTenure,
-          benchmarkStatus: "MISSING_START_DATE" as BenchmarkStatus
-        }
-      });
-    }
-
-    const matrixRow = await prisma.marketValueMatrix.findFirst({
-      where: {
-        tenureBand: tenure.tenureBand,
-        OR: [
-          { standardizedRoleId: mapping.standardizedRole.id },
+        AND: [
+          scopedWhere,
           {
-            roleName: {
-              equals: mapping.standardizedRole.roleName,
-              mode: "insensitive"
-            }
+            cycleId: activeCycle.id,
+            staffId
           }
         ]
+      },
+      select: {
+        id: true,
+        staffId: true,
+        fullName: true,
+        staffRole: true,
+        startDate: true
       }
     });
 
-    const resolvedWithMatrix = {
-      ...resolvedWithTenure,
-      marketMin: formatDecimalMoney(matrixRow?.minSalary),
-      marketMax: formatDecimalMoney(matrixRow?.maxSalary)
+    if (!caseRecord) {
+      return res.status(404).json({
+        success: false,
+        error: {
+          message: "Employee not found"
+        }
+      });
+    }
+
+    // ── Working Data first: single read, no re-derivation ──────────────────
+    const wd = await getOrBuildWorkingData(staffId);
+
+    if (!wd) {
+      return res.status(404).json({
+        success: false,
+        error: { message: "Employee working data not found" }
+      });
+    }
+
+    // Build benchmark payload from Working Data
+    const formatMoney = (v: number | null): string | null =>
+      v == null ? null : String(v);
+
+    const basePayload = {
+      staffId,
+      fullName: wd.fullName || caseRecord.fullName || staffId,
+      email: wd.email ?? null,
+      // Profile card fields — canonical from Working Data
+      hubspotRole: wd.hubspotRole ?? null,
+      rawRole: wd.hubspotRole ?? null,
+      standardizedRole: wd.normalizedRole ?? null,
+      normalizedRole: wd.normalizedRole ?? null,
+      normalizedRoleStatus: wd.normalizedRoleStatus ?? null,
+      matchSource: null as string | null,
+      confidenceScore: null as number | null,
+      staffStartDate: wd.startDate ?? caseRecord.startDate ?? null,
+      // Managers — canonical from Working Data (no stale fallback)
+      successManager: wd.successManagerName ?? null,
+      relationshipManager: wd.reportingManagerName ?? null,
+      tenureDisplay: wd.tenureDisplay ?? null,
+      tenureBand: wd.tenureMonths !== null ? (
+        wd.tenureMonths < 12 ? "T1" :
+        wd.tenureMonths < 24 ? "T2" :
+        wd.tenureMonths < 48 ? "T3" : "T4"
+      ) : null as string | null,
+      currentCompensation: wd.currentCompensation ?? null,
+      currency: wd.compensationCurrency ?? null,
+      effectiveDate: null as string | null,
+      marketMin: formatMoney(wd.marketMatrixMin),
+      marketMax: formatMoney(wd.marketMatrixMax),
+      marketMidpoint: wd.marketMatrixMin !== null && wd.marketMatrixMax !== null
+        ? formatMoney((wd.marketMatrixMin + wd.marketMatrixMax) / 2)
+        : null,
+      gapToMidpoint: wd.marketMatrixMin !== null && wd.marketMatrixMax !== null && wd.currentCompensation !== null
+        ? formatMoney(((wd.marketMatrixMin + wd.marketMatrixMax) / 2) - wd.currentCompensation)
+        : null,
+      benchmarkStatus: (wd.marketMatrixStatus ?? "MISSING_ROLE_MAPPING") as BenchmarkStatus
     };
 
-    if (!matrixRow) {
-      return res.status(200).json({
-        success: true,
-        data: {
-          ...resolvedWithMatrix,
-          benchmarkStatus: "MISSING_MARKET_MATRIX" as BenchmarkStatus
-        }
-      });
-    }
-
-    const compensation = employee.currentCompensation;
-    if (!compensation) {
-      return res.status(200).json({
-        success: true,
-        data: {
-          ...resolvedWithMatrix,
-          benchmarkStatus: "MISSING_CURRENT_COMPENSATION" as BenchmarkStatus
-        }
-      });
-    }
-
-    const marketMidpoint = matrixRow.minSalary.plus(matrixRow.maxSalary).dividedBy(new Prisma.Decimal(2));
-    const gapToMidpoint = marketMidpoint.minus(compensation.currentCompensation);
-
-    return res.status(200).json({
-      success: true,
-      data: {
-        ...resolvedWithMatrix,
-        currentCompensation: formatDecimalMoney(compensation.currentCompensation),
-        currency: compensation.currency,
-        effectiveDate: compensation.effectiveDate,
-        marketMidpoint: formatDecimalMoney(marketMidpoint),
-        gapToMidpoint: formatDecimalMoney(gapToMidpoint),
-        benchmarkStatus: "READY" as BenchmarkStatus
-      }
-    });
+    return res.status(200).json({ success: true, data: basePayload });
   } catch (error) {
     return res.status(500).json({
       success: false,
@@ -1347,7 +1548,7 @@ app.get("/cases/:id", async (req: Request, res: Response) => {
     const activeCycle = await ensureActiveCycle();
 
     // Get viewer identification
-    const viewer = getViewer(req);
+    const viewer = await resolveScopedViewer(req);
     if (!viewer) {
       return res.status(400).json({
         success: false,
@@ -1357,10 +1558,32 @@ app.get("/cases/:id", async (req: Request, res: Response) => {
       });
     }
 
+    const hierarchyDebug = await getHierarchyDebugForViewer(req, viewer);
+
+    const scopedWhere = await getScopedCaseWhere(viewer, {
+      cycleId: activeCycle.id,
+      includeRemoved: false
+    });
+
+    if (!scopedWhere) {
+      return res.status(404).json({
+        success: false,
+        error: {
+          message: `Case with ID ${id} not found or you do not have access to it`
+        },
+        hierarchy_debug: hierarchyDebug
+      });
+    }
+
     const appraisalCase = await prisma.appraisalCase.findFirst({
       where: {
-        id,
-        cycleId: activeCycle.id
+        AND: [
+          scopedWhere,
+          {
+            id,
+            cycleId: activeCycle.id
+          }
+        ]
       },
       select: {
         id: true,
@@ -1395,44 +1618,36 @@ app.get("/cases/:id", async (req: Request, res: Response) => {
         success: false,
         error: {
           message: `Case with ID ${id} not found or you do not have access to it`
-        }
+        },
+        hierarchy_debug: hierarchyDebug
       });
     }
 
-    // Apply access control check using normalized names
-    if (viewer.role === "SM") {
-      const normalizedViewerName = normalizeName(viewer.name);
-      const normalizedManagerName = normalizeName(appraisalCase.successManagerStaffId);
-      if (normalizedViewerName !== normalizedManagerName) {
-        return res.status(404).json({
-          success: false,
-          error: {
-            message: `Case with ID ${id} not found or you do not have access to it`
-          }
-        });
-      }
-    } else if (viewer.role === "RM") {
-      const normalizedViewerName = normalizeName(viewer.name);
-      const normalizedManagerName = normalizeName(appraisalCase.relationshipManagerStaffId);
-      if (normalizedViewerName !== normalizedManagerName) {
-        return res.status(404).json({
-          success: false,
-          error: {
-            message: `Case with ID ${id} not found or you do not have access to it`
-          }
-        });
-      }
-    }
+    // Use Working Data as source of truth for manager names and classification
+    // Falls back to live computation only if Working Data doesn't exist yet.
+    const workingData = await getOrBuildWorkingData(appraisalCase.staffId);
+    let successManager: string | null = null;
+    let relationshipManager: string | null = null;
+    let appraisalClassification: any = null;
 
-    // Resolve SM and RM display names using fallback chain
-    const managerNames = await resolveManagerNamesForCases([
-      {
-        staffId: appraisalCase.staffId,
-        directSmValue: appraisalCase.successManagerStaffId,
-        directRmValue: appraisalCase.relationshipManagerStaffId
-      }
-    ]);
-    const resolvedManagers = managerNames.get(appraisalCase.staffId);
+    if (workingData) {
+      successManager = workingData.successManagerName;
+      relationshipManager = workingData.reportingManagerName;
+      appraisalClassification = workingDataToClassification(appraisalCase.id, workingData);
+    } else {
+      // Fallback to live computation if Working Data not yet populated
+      const managerNames = await resolveManagerNamesForCases([
+        {
+          staffId: appraisalCase.staffId,
+          directSmValue: appraisalCase.successManagerStaffId,
+          directRmValue: appraisalCase.relationshipManagerStaffId
+        }
+      ]);
+      const resolvedManagers = managerNames.get(appraisalCase.staffId);
+      successManager = resolvedManagers?.smName ?? null;
+      relationshipManager = resolvedManagers?.rmName ?? null;
+      appraisalClassification = await getAppraisalClassificationForCase(appraisalCase.id);
+    }
 
     const caseData = {
       id: appraisalCase.id,
@@ -1440,8 +1655,9 @@ app.get("/cases/:id", async (req: Request, res: Response) => {
       full_name: appraisalCase.fullName,
       staff_role: appraisalCase.staffRole,
       contact_type: appraisalCase.contactType,
-      success_manager: resolvedManagers?.smName ?? null,
-      relationship_manager: resolvedManagers?.rmName ?? null,
+      success_manager: successManager,
+      relationship_manager: relationshipManager,
+      appraisal_classification: appraisalClassification,
       status: appraisalCase.status,
       created_at: appraisalCase.createdAt,
       updated_at: appraisalCase.updatedAt,
@@ -1456,9 +1672,16 @@ app.get("/cases/:id", async (req: Request, res: Response) => {
       }))
     };
 
+    logHierarchyModuleDebug("cases.detail", viewer, {
+      caseId: id,
+      staffId: appraisalCase.staffId,
+      activeCycleId: activeCycle.id
+    });
+
     return res.status(200).json({
       success: true,
-      data: caseData
+      data: caseData,
+      hierarchy_debug: hierarchyDebug
     });
   } catch (error) {
     return res.status(500).json({
@@ -1832,6 +2055,7 @@ app.post("/wsll/upload", upload.single("file"), async (req, res) => {
     }> = [];
 
     let imported = 0;
+    const importedStaffIds: string[] = [];
 
     for (let index = 0; index < rows.length; index += 1) {
       const rowNumber = index + 2;
@@ -1916,7 +2140,15 @@ app.post("/wsll/upload", upload.single("file"), async (req, res) => {
         }
       });
 
+      importedStaffIds.push(staffId);
       imported += 1;
+    }
+
+    // Background Working Data refresh for affected employees (non-blocking)
+    if (importedStaffIds.length > 0) {
+      refreshWorkingDataForEmployees(importedStaffIds).catch((error) => {
+        console.error("[WSLL Upload] Working Data refresh error:", error);
+      });
     }
 
     return res.status(200).json({
@@ -2017,7 +2249,7 @@ app.get("/wsll/table/sm/:smOwnerId", async (req, res) => {
 
 app.get("/wsll/table", async (req, res) => {
   try {
-    const viewer = getViewer(req);
+    const viewer = await resolveScopedViewer(req);
     if (!viewer) {
       return res.status(400).json({
         success: false,
@@ -2026,6 +2258,8 @@ app.get("/wsll/table", async (req, res) => {
         }
       });
     }
+
+    const hierarchyDebug = await getHierarchyDebugForViewer(req, viewer);
 
     const activeCycle = await ensureActiveCycle();
     const pageSize = 500;
@@ -2092,12 +2326,19 @@ app.get("/wsll/table", async (req, res) => {
       (row) => row.q1_wsll !== null || row.q2_wsll !== null || row.q3_wsll !== null || row.q4_wsll !== null
     );
 
+    logHierarchyModuleDebug("wsll.table", viewer, {
+      scopedStaffCount: scopedStaff.length,
+      wsllRowCount: rowsWithWsll.length,
+      activeCycleId: activeCycle.id
+    });
+
     return res.status(200).json({
       success: true,
       data: {
         total_va_count: scopedStaff.length,
         wsll_row_count: rowsWithWsll.length,
-        rows: rowsWithWsll
+        rows: rowsWithWsll,
+        hierarchy_debug: hierarchyDebug
       }
     });
   } catch (error) {
@@ -2583,6 +2824,7 @@ app.post("/compensation/import", upload.single("file"), async (req, res) => {
     let updated = 0;
     let skipped = 0;
     const skippedStaffIds = new Set<string>();
+    const updatedStaffIds: string[] = [];
 
     for (const row of rows) {
       processed += 1;
@@ -2624,7 +2866,15 @@ app.post("/compensation/import", upload.single("file"), async (req, res) => {
         }
       });
 
+      updatedStaffIds.push(staffId);
       updated += 1;
+    }
+
+    // Background Working Data refresh for affected employees (non-blocking)
+    if (updatedStaffIds.length > 0) {
+      refreshWorkingDataForEmployees(updatedStaffIds).catch((error) => {
+        console.error("[Compensation Import] Working Data refresh error:", error);
+      });
     }
 
     return res.status(200).json({
@@ -4700,6 +4950,129 @@ app.post("/guardrails/evaluate", express.json(), async (req: Request, res: Respo
   }
 });
 
+// ============================================================================
+// ADMIN — Sync Status
+// ============================================================================
+
+// GET /admin/sync-status — returns the latest SyncRecord
+app.get("/admin/sync-status", requireAuth, async (_req, res) => {
+  try {
+    const latest = await getLastSyncRecord();
+    return res.json({ data: latest ?? null });
+  } catch {
+    return res.status(500).json({ error: { message: "Failed to fetch sync status" } });
+  }
+});
+
+// ============================================================================
+// ADMIN — Data Quality
+// ============================================================================
+
+// GET /admin/data-quality/summary — aggregate counts
+app.get("/admin/data-quality/summary", requireAuth, async (_req, res) => {
+  try {
+    const summary = await getDataQualitySummary();
+    return res.json({ data: summary });
+  } catch {
+    return res.status(500).json({ error: { message: "Failed to fetch data quality summary" } });
+  }
+});
+
+// GET /admin/data-quality — paginated issue list with optional filters
+// Query params: category, severity, status, page, limit
+app.get("/admin/data-quality", requireAuth, async (req, res) => {
+  try {
+    const { category, severity, status, page, limit } = req.query as Record<string, string>;
+    const result = await listDataQualityIssues({
+      category: category || undefined,
+      severity: severity || undefined,
+      status: status || undefined,
+      page: page ? Number(page) : 1,
+      limit: limit ? Number(limit) : 50
+    });
+    return res.json(result);
+  } catch {
+    return res.status(500).json({ error: { message: "Failed to fetch data quality issues" } });
+  }
+});
+
+// PATCH /admin/data-quality/:id/status — update issue status
+app.patch("/admin/data-quality/:id/status", requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, resolvedBy } = req.body as { status: string; resolvedBy?: string };
+    const allowed = ["OPEN", "AUTO_RESOLVED", "NEEDS_ADMIN_REVIEW", "RESOLVED"];
+    if (!allowed.includes(status)) {
+      return res.status(400).json({ error: { message: `status must be one of: ${allowed.join(", ")}` } });
+    }
+    await updateIssueStatus(id, status as any, resolvedBy);
+    return res.json({ success: true });
+  } catch {
+    return res.status(500).json({ error: { message: "Failed to update issue status" } });
+  }
+});
+
+// POST /admin/data-quality/run — trigger data quality checks (admin only)
+app.post("/admin/data-quality/run", requireAuth, async (_req, res) => {
+  try {
+    const detected = await runDataQualityChecks();
+    return res.json({ data: { detected } });
+  } catch {
+    return res.status(500).json({ error: { message: "Failed to run data quality checks" } });
+  }
+});
+
+// POST /admin/working-data/refresh — rebuild Working Data for all active employees
+app.post("/admin/working-data/refresh", requireAuth, async (_req, res) => {
+  try {
+    const result = await refreshAllWorkingData();
+    return res.json({
+      data: {
+        saved: result.saved,
+        errors: result.errors,
+        message: `Working Data rebuilt for ${result.saved} employee(s). ${result.errors} error(s).`
+      }
+    });
+  } catch {
+    return res.status(500).json({ error: { message: "Failed to refresh Working Data" } });
+  }
+});
+
+// GET /admin/working-data/exceptions — employees with non-READY market status, unmapped roles, or no WSLL
+app.get("/admin/working-data/exceptions", requireAuth, async (_req, res) => {
+  try {
+    const [notReady, unmapped, noWsll] = await Promise.all([
+      prisma.$queryRaw<Array<{ status: string; count: bigint }>>`
+        SELECT "marketMatrixStatus" AS status, COUNT(*)::int AS count
+        FROM employee_working_data
+        WHERE "isActiveForAppraisal" = true AND "marketMatrixStatus" != 'READY'
+        GROUP BY "marketMatrixStatus"
+      `,
+      prisma.$queryRaw<Array<{ count: bigint }>>`
+        SELECT COUNT(*)::int AS count
+        FROM employee_working_data
+        WHERE "isActiveForAppraisal" = true AND "normalizedRoleStatus" = 'UNMAPPED'
+      `,
+      prisma.$queryRaw<Array<{ count: bigint }>>`
+        SELECT COUNT(*)::int AS count
+        FROM employee_working_data
+        WHERE "isActiveForAppraisal" = true AND "wsllStatus" = 'NO_WSLL'
+      `
+    ]);
+
+    return res.json({
+      data: {
+        marketMatrixNotReady: notReady.map((r) => ({ status: r.status, count: Number(r.count) })),
+        unmappedRoles: Number(unmapped[0]?.count ?? 0),
+        noWsllData: Number(noWsll[0]?.count ?? 0)
+      }
+    });
+  } catch (error) {
+    return res.status(500).json({ error: { message: "Failed to load Working Data exceptions" } });
+  }
+});
+
 app.listen(port, () => {
   console.log(`API listening on http://localhost:${port}`);
 });
+

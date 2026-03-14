@@ -56,11 +56,6 @@ export const getPhpToAudRate = (): number | null => {
 		return envRate;
 	}
 
-	const stored = Number(localStorage.getItem('php_to_aud_rate'));
-	if (Number.isFinite(stored) && stored > 0) {
-		return stored;
-	}
-
 	return null;
 };
 

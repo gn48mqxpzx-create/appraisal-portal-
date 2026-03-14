@@ -1,6 +1,8 @@
 import jwt from "jsonwebtoken";
 import type { Request, Response, NextFunction } from "express";
-import { getContactByEmail } from "./hubspot/hubspotService";
+import { resolveViewerHierarchy } from "./services/hierarchyResolutionService";
+import { ViewerNotFoundError, resolveViewerByEmail } from "./services/viewerResolutionService";
+import { shouldTriggerSync, syncEmployeeDirectory } from "./services/employeeDirectoryService";
 
 // JWT secret with fallback
 const getJwtSecret = (): string => {
@@ -16,9 +18,13 @@ export interface ViewerContext {
   viewer_email: string;
   viewer_full_name: string;
   viewer_type: "SM" | "RM" | "UNSCOPED";
+  viewer_role: "SITE_LEAD" | "SUCCESS_MANAGER" | "RELATIONSHIP_MANAGER" | "REVIEWER" | "UNSCOPED";
   sm_owner_id: string | null;
   rm_name: string | null;
   staff_id: string | null;
+  resolved_user_id: string | null;
+  scope_staff_count: number;
+  unresolved_hierarchy_reason: string | null;
 }
 
 export interface JwtPayload extends ViewerContext {
@@ -47,42 +53,36 @@ export async function loginHandler(req: Request, res: Response): Promise<void> {
       return;
     }
 
-    // Look up contact in HubSpot
-    const contact = await getContactByEmail(email);
-    
-    if (!contact) {
-      res.status(404).json({ error: "Email not found in HubSpot contacts" });
-      return;
-    }
+    const resolvedViewer = await resolveViewerByEmail(email);
+    const hierarchy = await resolveViewerHierarchy({
+      email,
+      role: resolvedViewer.scopedRole
+    });
 
-    const props = contact.properties;
-    
-    // Extract properties
-    const firstName = props.firstname || "";
-    const lastName = props.lastname || "";
-    const fullName = [firstName, lastName].filter(Boolean).join(" ").trim() || email;
-    const staffId = props.staff_id_number || null;
-    const smOwnerId = props.sm || null;
-    const rmName = props.senior_success_manager || null;
-
-    // Determine viewer type
-    let viewerType: "SM" | "RM" | "UNSCOPED";
-    if (smOwnerId) {
+    let viewerType: "SM" | "RM" | "UNSCOPED" = "UNSCOPED";
+    if (hierarchy.scopedRole === "SUCCESS_MANAGER") {
       viewerType = "SM";
-    } else if (rmName) {
+    } else if (hierarchy.scopedRole === "RELATIONSHIP_MANAGER") {
       viewerType = "RM";
-    } else {
-      viewerType = "UNSCOPED";
     }
+
+    const fullName = hierarchy.resolvedViewerRecord?.fullName || resolvedViewer.fullName || email;
+    const staffId = hierarchy.resolvedViewerRecord?.staffId || null;
+    const smOwnerId = hierarchy.resolvedViewerRecord?.smOwnerId || null;
+    const rmName = hierarchy.resolvedViewerRecord?.rmName || hierarchy.rmOwner?.fullName || null;
 
     // Build viewer context
     const viewer: ViewerContext = {
       viewer_email: email,
       viewer_full_name: fullName,
       viewer_type: viewerType,
+      viewer_role: hierarchy.scopedRole,
       sm_owner_id: smOwnerId,
       rm_name: rmName,
-      staff_id: staffId
+      staff_id: staffId,
+      resolved_user_id: staffId || hierarchy.rmOwner?.id || null,
+      scope_staff_count: hierarchy.scopedStaffIds.length,
+      unresolved_hierarchy_reason: hierarchy.unresolvedHierarchyReason
     };
 
     // Generate JWT token
@@ -90,19 +90,30 @@ export async function loginHandler(req: Request, res: Response): Promise<void> {
       expiresIn: "7d"
     });
 
+    // Freshness check: trigger background delta sync if last sync is stale (>10 min)
+    shouldTriggerSync(10).then((stale) => {
+      if (stale) {
+        console.log(`[loginHandler] Stale directory — triggering background delta sync for ${email}`);
+        syncEmployeeDirectory({ triggeredBy: "login", deltaOnly: true }).catch((err) => {
+          console.warn("[loginHandler] Background delta sync failed:", err instanceof Error ? err.message : err);
+        });
+      }
+    }).catch(() => {});
+
     res.status(200).json({
       token,
       viewer
     });
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : "Unknown error";
-    
-    if (errorMessage.includes("Missing HUBSPOT_API_TOKEN")) {
-      res.status(500).json({
-        error: "Missing HUBSPOT_API_TOKEN. Please set HUBSPOT_API_TOKEN in the API environment."
+    if (error instanceof ViewerNotFoundError) {
+      res.status(404).json({
+        error: "Viewer not found",
+        details: `No exact email match for: ${error.email}`
       });
       return;
     }
+
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
 
     res.status(500).json({
       error: "Login failed",
@@ -139,9 +150,13 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
         viewer_email: decoded.viewer_email,
         viewer_full_name: decoded.viewer_full_name,
         viewer_type: decoded.viewer_type,
+        viewer_role: decoded.viewer_role,
         sm_owner_id: decoded.sm_owner_id,
         rm_name: decoded.rm_name,
-        staff_id: decoded.staff_id
+        staff_id: decoded.staff_id,
+        resolved_user_id: decoded.resolved_user_id,
+        scope_staff_count: decoded.scope_staff_count,
+        unresolved_hierarchy_reason: decoded.unresolved_hierarchy_reason
       };
       
       next();

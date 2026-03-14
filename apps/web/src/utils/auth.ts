@@ -26,13 +26,17 @@ export interface ViewerSession {
 }
 
 const ADMIN_EMAIL = 'uly@vaplatinum.com.au';
+const VIEWER_SESSION_KEY = 'viewerSession';
+const LEGACY_VIEWER_KEYS = ['cases_viewer_role', 'cases_viewer_name'];
+
+const normalizeEmail = (email: string): string => email.trim().toLowerCase();
 
 /**
  * Determine role from viewer data with admin override
  */
 export function determineRole(viewerEmail: string, viewerType: 'SM' | 'RM'): Role {
   // Admin override
-  if (viewerEmail.toLowerCase().trim() === ADMIN_EMAIL.toLowerCase()) {
+  if (normalizeEmail(viewerEmail) === normalizeEmail(ADMIN_EMAIL)) {
     return 'Admin';
   }
 
@@ -113,14 +117,14 @@ export function enrichViewerSession(viewerData: any): ViewerSession {
  * Save viewer session to localStorage
  */
 export function saveViewerSession(session: ViewerSession): void {
-  localStorage.setItem('viewerSession', JSON.stringify(session));
+  localStorage.setItem(VIEWER_SESSION_KEY, JSON.stringify(session));
 }
 
 /**
  * Load viewer session from localStorage
  */
 export function loadViewerSession(): ViewerSession | null {
-  const stored = localStorage.getItem('viewerSession');
+  const stored = localStorage.getItem(VIEWER_SESSION_KEY);
   if (!stored) return null;
 
   try {
@@ -134,7 +138,8 @@ export function loadViewerSession(): ViewerSession | null {
  * Clear viewer session
  */
 export function clearViewerSession(): void {
-  localStorage.removeItem('viewerSession');
+  localStorage.removeItem(VIEWER_SESSION_KEY);
+  LEGACY_VIEWER_KEYS.forEach((key) => localStorage.removeItem(key));
 }
 
 /**

@@ -31,8 +31,8 @@ const toWsllResult = (averageWsll: number | null): WsllEligibilityResult => {
     return {
       status: "MISSING_WSLL",
       averageWsll: null,
-      isEligibleForAppraisal: false,
-      blockerMessage: "WSLL data is required before a recommendation can be created."
+      isEligibleForAppraisal: true,
+      blockerMessage: "No qualifying WSLL found. RM approval is required."
     };
   }
 
@@ -40,8 +40,8 @@ const toWsllResult = (averageWsll: number | null): WsllEligibilityResult => {
     return {
       status: "WSLL_BELOW_THRESHOLD",
       averageWsll,
-      isEligibleForAppraisal: false,
-      blockerMessage: "Employee is not eligible for appraisal because average WSLL is below 2.8."
+      isEligibleForAppraisal: true,
+      blockerMessage: "WSLL is below 2.8 and is treated as No WSLL. RM approval is required."
     };
   }
 

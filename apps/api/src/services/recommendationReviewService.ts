@@ -4,6 +4,12 @@ import { getScopedCaseWhere, normalizeScopedRole } from "./employeeScopeService"
 import { resolveUserIdByEmail } from "./userResolutionService";
 import { getLatestWsllEligibilityByStaffId } from "./wsllEligibilityService";
 import { resolveManagerNamesForCases } from "./employeeDirectoryService";
+import {
+  getAppraisalClassificationForCase,
+  getAppraisalClassificationForCases,
+  type AppraisalClassification
+} from "./appraisalClassificationService";
+import { getOrBuildWorkingData, workingDataToClassification } from "./employeeWorkingDataService";
 
 const prisma = new PrismaClient();
 
@@ -73,6 +79,7 @@ type WorkflowSummary = {
     reviewedBy: string | null;
     reviewedAt: string | null;
   } | null;
+  appraisalClassification: AppraisalClassification | null;
 };
 
 const roundCurrency = (value: number) => Number(value.toFixed(2));
@@ -181,15 +188,34 @@ const mapWorkflowSummary = async (caseId: string): Promise<WorkflowSummary> => {
   const wsllEligibility = await getLatestWsllEligibilityByStaffId(caseRecord.staffId);
   const recommendation = caseRecord.recommendation;
 
-  // Resolve SM and RM display names using fallback chain
-  const managerNames = await resolveManagerNamesForCases([
-    {
-      staffId: caseRecord.staffId,
-      directSmValue: caseRecord.successManagerStaffId,
-      directRmValue: caseRecord.relationshipManagerStaffId
-    }
-  ]);
-  const { smName: successManager, rmName: relationshipManager } = managerNames.get(caseRecord.staffId) ?? { smName: null, rmName: null };
+  // Use Working Data as canonical source for managers and classification
+  const workingData = await getOrBuildWorkingData(caseRecord.staffId);
+  let successManager: string | null = null;
+  let relationshipManager: string | null = null;
+  let appraisalClassification: AppraisalClassification | null = null;
+
+  if (workingData) {
+    successManager = workingData.successManagerName;
+    relationshipManager = workingData.reportingManagerName;
+    appraisalClassification = workingDataToClassification(caseRecord.id, workingData);
+  } else {
+    // Fallback to live computation if Working Data not yet populated
+    const employeeDirectoryRecord = await prisma.employeeDirectory.findUnique({
+      where: { staffId: caseRecord.staffId },
+      select: { rmName: true }
+    });
+    const managerNames = await resolveManagerNamesForCases([
+      {
+        staffId: caseRecord.staffId,
+        directSmValue: caseRecord.successManagerStaffId,
+        directRmValue: employeeDirectoryRecord?.rmName ?? caseRecord.relationshipManagerStaffId
+      }
+    ]);
+    const resolved = managerNames.get(caseRecord.staffId);
+    successManager = resolved?.smName ?? null;
+    relationshipManager = resolved?.rmName ?? null;
+    appraisalClassification = await getAppraisalClassificationForCase(caseRecord.id);
+  }
 
   return {
     caseId: caseRecord.id,
@@ -228,7 +254,8 @@ const mapWorkflowSummary = async (caseId: string): Promise<WorkflowSummary> => {
           reviewedBy: recommendation.reviewedBy,
           reviewedAt: recommendation.reviewedAt?.toISOString() ?? null
         }
-      : null
+      : null,
+    appraisalClassification
   };
 };
 
@@ -259,9 +286,6 @@ export async function submitRecommendationForReview(caseId: string, input: Submi
   }
 
   const wsllEligibility = await getLatestWsllEligibilityByStaffId(caseRecord.staffId);
-  if (!wsllEligibility.isEligibleForAppraisal) {
-    throw new Error(wsllEligibility.blockerMessage || "Case is not eligible for recommendation.");
-  }
 
   const guardrail = await ensureSubmittedGuardrailsPass(increasePercent, increaseAmount, input.justification);
   const now = new Date();
@@ -280,7 +304,10 @@ export async function submitRecommendationForReview(caseId: string, input: Submi
       submittedIncreaseAmount: roundCurrency(increaseAmount),
       submittedIncreasePercent: roundPercent(increasePercent),
       submittedGuardrailLevel: guardrail.guardrailLevel,
-      submittedGuardrailAction: guardrail.actionRequired,
+      submittedGuardrailAction:
+        wsllEligibility.status === "PASS"
+          ? guardrail.actionRequired
+          : `${guardrail.actionRequired} · RM override required before approval`,
       submittedCustomInputMode: input.recommendationType === "CUSTOM" ? input.customInputMode ?? null : null,
       submittedJustification: (input.justification || "").trim() || null,
       submittedBy,
@@ -306,7 +333,10 @@ export async function submitRecommendationForReview(caseId: string, input: Submi
       submittedIncreaseAmount: roundCurrency(increaseAmount),
       submittedIncreasePercent: roundPercent(increasePercent),
       submittedGuardrailLevel: guardrail.guardrailLevel,
-      submittedGuardrailAction: guardrail.actionRequired,
+      submittedGuardrailAction:
+        wsllEligibility.status === "PASS"
+          ? guardrail.actionRequired
+          : `${guardrail.actionRequired} · RM override required before approval`,
       submittedCustomInputMode: input.recommendationType === "CUSTOM" ? input.customInputMode ?? null : null,
       submittedJustification: (input.justification || "").trim() || null,
       submittedBy,
@@ -357,6 +387,11 @@ export async function reviewRecommendation(caseId: string, input: ReviewDecision
 
   if (!caseRecord.recommendation?.submittedAt) {
     throw new Error("Submitted recommendation not found");
+  }
+
+  const appraisalClassification = await getAppraisalClassificationForCase(caseId);
+  if (appraisalClassification?.rmApprovalRequired && input.decision === "APPROVE_AS_SUBMITTED") {
+    throw new Error("RM override is required for NO_WSLL classifications. Use OVERRIDE_AND_APPROVE.");
   }
 
   const now = new Date();
@@ -468,6 +503,10 @@ export async function getCaseWorkflowByStaffId(caseStaffId: string) {
   return mapWorkflowSummary(caseRecord.id);
 }
 
+export async function getCaseWorkflowByCaseId(caseId: string) {
+  return mapWorkflowSummary(caseId);
+}
+
 export async function getReviewQueue(viewer: { name: string; role: string; email?: string; id?: string }) {
   const scopedRole = normalizeScopedRole(viewer.role);
   if (!scopedRole) {
@@ -521,6 +560,8 @@ export async function getReviewQueue(viewer: { name: string; role: string; email
     compensationRows.map((row) => [row.staffId, Number(row.currentCompensation)])
   );
 
+  const classificationByCaseId = await getAppraisalClassificationForCases(cases.map((caseItem) => caseItem.id));
+
   return cases
     .filter((caseItem) => caseItem.recommendation?.submittedAt)
     .map((caseItem) => ({
@@ -538,7 +579,13 @@ export async function getReviewQueue(viewer: { name: string; role: string; email
         : null,
       guardrailLevel: caseItem.recommendation?.submittedGuardrailLevel ?? null,
       submittedBy: caseItem.recommendation?.submittedBy ?? null,
-      submittedDate: caseItem.recommendation?.submittedAt?.toISOString() ?? null
+      submittedDate: caseItem.recommendation?.submittedAt?.toISOString() ?? null,
+      appraisalCategory: classificationByCaseId.get(caseItem.id)?.appraisalCategory ?? null,
+      rmApprovalRequired: classificationByCaseId.get(caseItem.id)?.rmApprovalRequired ?? false,
+      wsllStatus: classificationByCaseId.get(caseItem.id)?.wsllStatus ?? null,
+      wsllReason: classificationByCaseId.get(caseItem.id)?.wsllReason ?? null,
+      tenureGroup: classificationByCaseId.get(caseItem.id)?.tenureGroup ?? null,
+      marketPosition: classificationByCaseId.get(caseItem.id)?.marketPosition ?? null
     }));
 }
 

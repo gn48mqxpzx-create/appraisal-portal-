@@ -164,8 +164,9 @@ export function MarketBenchmarksPage() {
         <h3 className="text-lg font-semibold text-gray-900 mb-3">Create Tenure Band</h3>
         <form onSubmit={handleCreateTenureBand} className="grid grid-cols-1 gap-4 md:grid-cols-4">
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Band Name</label>
+            <label htmlFor="market-band-name" className="block text-sm font-medium text-gray-700 mb-1">Band Name</label>
             <input
+              id="market-band-name"
               type="text"
               value={newBandName}
               onChange={(e) => setNewBandName(e.target.value)}
@@ -175,8 +176,9 @@ export function MarketBenchmarksPage() {
             />
           </div>
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Min Months</label>
+            <label htmlFor="market-band-min-months" className="block text-sm font-medium text-gray-700 mb-1">Min Months</label>
             <input
+              id="market-band-min-months"
               type="number"
               value={newBandMinMonths}
               onChange={(e) => setNewBandMinMonths(e.target.value)}
@@ -185,8 +187,9 @@ export function MarketBenchmarksPage() {
             />
           </div>
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Max Months</label>
+            <label htmlFor="market-band-max-months" className="block text-sm font-medium text-gray-700 mb-1">Max Months</label>
             <input
+              id="market-band-max-months"
               type="number"
               value={newBandMaxMonths}
               onChange={(e) => setNewBandMaxMonths(e.target.value)}
@@ -239,8 +242,9 @@ export function MarketBenchmarksPage() {
         <h3 className="text-lg font-semibold text-gray-900 mb-3">Create/Update Benchmark</h3>
         <form onSubmit={handleCreateBenchmark} className="grid grid-cols-1 gap-4 md:grid-cols-5">
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Staff Role</label>
+            <label htmlFor="market-benchmark-role" className="block text-sm font-medium text-gray-700 mb-1">Staff Role</label>
             <input
+              id="market-benchmark-role"
               type="text"
               value={newBenchmarkRole}
               onChange={(e) => setNewBenchmarkRole(e.target.value)}
@@ -250,8 +254,11 @@ export function MarketBenchmarksPage() {
             />
           </div>
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Tenure Band</label>
+            <label htmlFor="market-benchmark-tenure-band" className="block text-sm font-medium text-gray-700 mb-1">Tenure Band</label>
             <select
+              id="market-benchmark-tenure-band"
+              aria-label="Tenure Band"
+              title="Tenure Band"
               value={newBenchmarkTenureBandId}
               onChange={(e) => setNewBenchmarkTenureBandId(e.target.value)}
               className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
@@ -266,8 +273,9 @@ export function MarketBenchmarksPage() {
             </select>
           </div>
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Base Salary</label>
+            <label htmlFor="market-benchmark-base-salary" className="block text-sm font-medium text-gray-700 mb-1">Base Salary</label>
             <input
+              id="market-benchmark-base-salary"
               type="number"
               step="0.01"
               value={newBenchmarkBaseSalary}
@@ -277,10 +285,11 @@ export function MarketBenchmarksPage() {
             />
           </div>
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
+            <label htmlFor="market-benchmark-catchup" className="block text-sm font-medium text-gray-700 mb-1">
               Catchup % (optional)
             </label>
             <input
+              id="market-benchmark-catchup"
               type="number"
               value={newBenchmarkCatchup}
               onChange={(e) => setNewBenchmarkCatchup(e.target.value)}
@@ -307,9 +316,13 @@ export function MarketBenchmarksPage() {
         </p>
         <form onSubmit={handleUploadBenchmarks} className="flex gap-4 items-end">
           <div className="flex-1">
+            <label htmlFor="market-benchmark-upload-file" className="block text-sm font-medium text-gray-700 mb-1">Benchmark CSV File</label>
             <input
+              id="market-benchmark-upload-file"
               type="file"
               accept=".csv"
+              aria-label="Benchmark CSV File"
+              title="Benchmark CSV File"
               onChange={(e) => setUploadFile(e.target.files?.[0] || null)}
               className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
             />

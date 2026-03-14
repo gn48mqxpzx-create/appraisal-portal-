@@ -197,7 +197,15 @@ export function ReviewQueuePage({ viewerSession }: ReviewQueuePageProps) {
       setGuardrailResult(null);
 
       try {
-        const response = await fetch(`http://localhost:3001/cases/by-staff/${encodeURIComponent(selectedItem.staffId)}/workflow`);
+        const params = new URLSearchParams();
+        if (viewerRole) {
+          params.set('viewerRole', viewerRole);
+        }
+        if (viewerRole !== 'ADMIN' && viewerSession?.viewer_email) {
+          params.set('viewerEmail', viewerSession.viewer_email);
+        }
+        const query = params.toString();
+        const response = await fetch(`http://localhost:3001/cases/by-staff/${encodeURIComponent(selectedItem.staffId)}/workflow${query ? `?${query}` : ''}`);
         const payload = await response.json().catch(() => ({}));
 
         if (!response.ok) {
@@ -216,7 +224,7 @@ export function ReviewQueuePage({ viewerSession }: ReviewQueuePageProps) {
     };
 
     void loadWorkflow();
-  }, [selectedItem]);
+  }, [selectedItem, viewerRole, viewerSession]);
 
   const overridePreview = useMemo(() => {
     return buildOverridePreview(workflow?.currentSalary ?? null, overrideInputMode, overrideInputValue);

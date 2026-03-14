@@ -18,6 +18,27 @@ import {
   canAccessPage
 } from './utils/auth';
 
+const normalizeEmail = (email: string): string => email.trim().toLowerCase();
+
+const fetchExactViewerSession = async (email: string): Promise<ViewerSession> => {
+  const normalizedEmail = normalizeEmail(email);
+  const response = await fetch(`http://localhost:3001/directory/viewer/${encodeURIComponent(normalizedEmail)}`);
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.error || errorData.details || 'Failed to load viewer data');
+  }
+
+  const data = await response.json();
+  const resolvedEmail = normalizeEmail(data.viewer_email || '');
+
+  if (resolvedEmail !== normalizedEmail) {
+    throw new Error(`Viewer identity mismatch: requested ${normalizedEmail} but resolved ${resolvedEmail || 'unknown'}`);
+  }
+
+  return enrichViewerSession(data);
+};
+
 function App() {
   const [currentPage, setCurrentPage] = useState('dashboard');
   const [viewerSession, setViewerSession] = useState<ViewerSession | null>(null);
@@ -27,23 +48,31 @@ function App() {
 
   // Check for existing session on mount
   useEffect(() => {
-    const existingSession = loadViewerSession();
-    if (existingSession) {
-      setViewerSession(existingSession);
-    }
-    setIsCheckingSession(false);
+    const restoreSession = async () => {
+      const existingSession = loadViewerSession();
+      if (!existingSession?.viewer_email) {
+        setIsCheckingSession(false);
+        return;
+      }
+
+      try {
+        const refreshed = await fetchExactViewerSession(existingSession.viewer_email);
+        saveViewerSession(refreshed);
+        setViewerSession(refreshed);
+      } catch {
+        clearViewerSession();
+        setViewerSession(null);
+      } finally {
+        setIsCheckingSession(false);
+      }
+    };
+
+    void restoreSession();
   }, []);
 
   const handleLogin = async (email: string) => {
-    const response = await fetch(`http://localhost:3001/directory/viewer/${encodeURIComponent(email)}`);
-    
-    if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(errorData.error || 'Failed to load viewer data');
-    }
-
-    const data = await response.json();
-    const session = enrichViewerSession(data);
+    clearViewerSession();
+    const session = await fetchExactViewerSession(email);
     saveViewerSession(session);
     setViewerSession(session);
   };

@@ -1,7 +1,44 @@
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient, Prisma } from "@prisma/client";
 import { hubspotFetch, fetchHubSpotOwners, resolveOwnerIdByName, HubSpotOwner } from "./hubspotClient";
+import { refreshWorkingDataForEmployees } from "./employeeWorkingDataService";
 
 const prisma = new PrismaClient();
+
+// ── Sync lock: prevents concurrent syncs (single-process guard) ──────────────
+let activeSyncPromise: Promise<SyncResult> | null = null;
+
+export interface SyncResult {
+  result: "success" | "failed";
+  synced: number;
+  updated: number;
+  created: number;
+  mergedDuplicates: number;
+  skipped: number;
+  conflicts: number;
+  errors: string[];
+  timestamp: string;
+  mode: "FULL" | "DELTA";
+  durationMs: number;
+}
+
+/** Returns the most recent SyncRecord, or null if none exists */
+export async function getLastSyncRecord() {
+  return prisma.syncRecord.findFirst({ orderBy: { startedAt: "desc" } });
+}
+
+/**
+ * Returns true if a sync should be triggered because the last successful sync
+ * is older than thresholdMinutes, or no sync has ever run.
+ */
+export async function shouldTriggerSync(thresholdMinutes = 10): Promise<boolean> {
+  const last = await prisma.syncRecord.findFirst({
+    where: { status: "SUCCESS" },
+    orderBy: { startedAt: "desc" }
+  });
+  if (!last) return true;
+  const ageMs = Date.now() - last.startedAt.getTime();
+  return ageMs > thresholdMinutes * 60_000;
+}
 
 type EmployeeType = "VA" | "SM";
 
@@ -52,27 +89,36 @@ function toStaffRow(record: any): StaffRow {
 }
 
 /**
- * Fetch all staff contacts from HubSpot with pagination
+ * Fetch staff contacts from HubSpot with pagination.
+ * Pass updatedAfter to only fetch contacts modified since that timestamp (delta sync).
  */
-async function fetchAllStaffContacts(filterGroups?: any[]): Promise<HubSpotContact[]> {
+async function fetchAllStaffContacts(filterGroups?: any[], updatedAfter?: Date): Promise<HubSpotContact[]> {
   const allContacts: HubSpotContact[] = [];
   let after: string | undefined;
 
-  const defaultFilters = [
-    {
-      filters: [
-        {
-          propertyName: "contact_type",
-          operator: "EQ",
-          value: "Staff Member - Active"
-        }
-      ]
-    }
+  // Base contact-type groups: VA (Staff Member - Active) and SM (Ops Staff - Active)
+  const baseGroups = filterGroups ?? [
+    { filters: [{ propertyName: "contact_type", operator: "EQ", value: "Staff Member - Active" }] },
+    { filters: [{ propertyName: "contact_type", operator: "EQ", value: "Ops Staff - Active" }] }
   ];
+
+  // For delta sync: add hs_lastmodifieddate filter to each group (AND within group)
+  const effectiveGroups = updatedAfter
+    ? baseGroups.map((g: any) => ({
+        filters: [
+          ...g.filters,
+          {
+            propertyName: "hs_lastmodifieddate",
+            operator: "GTE",
+            value: String(updatedAfter.getTime())
+          }
+        ]
+      }))
+    : baseGroups;
 
   do {
     const searchPayload: any = {
-      filterGroups: filterGroups || defaultFilters,
+      filterGroups: effectiveGroups,
       properties: [
         "staff_id_number",
         "firstname",
@@ -82,7 +128,8 @@ async function fetchAllStaffContacts(filterGroups?: any[]): Promise<HubSpotConta
         "contact_type",
         "sm",
         "senior_success_manager",
-        "staff_start_date"
+        "staff_start_date",
+        "hs_lastmodifieddate"
       ],
       limit: 200
     };
@@ -324,199 +371,403 @@ export async function getViewerByEmail(email: string): Promise<{
 }
 
 /**
- * Sync employee directory from HubSpot
- * Fetches active VA and SM contacts and upserts into employee_directory
- * Returns sync summary
+ * Sync employee directory from HubSpot.
+ *
+ * Smart sync features:
+ * - Sync lock: if a sync is already running, waits for it and reuses the result
+ * - Delta mode: only fetches contacts modified since last successful sync
+ * - Strict dedup: match by hubspotContactId → email → create new
+ * - Conflict detection: flags duplicate hubspotContactId / email mismatches
+ * - Employment status: marks records absent from full sync as inactive
+ * - Persists SyncRecord for status visibility
  */
-export async function syncEmployeeDirectory(): Promise<{
-  result: "success";
-  synced: number;
-  skipped: number;
-  errors: string[];
-  timestamp: string;
-}> {
-  console.log("[syncEmployeeDirectory] Starting sync...");
+export async function syncEmployeeDirectory(options?: {
+  triggeredBy?: "admin" | "login" | "scheduled";
+  deltaOnly?: boolean;
+}): Promise<SyncResult> {
+  // If a sync is already running, wait for it and reuse the result
+  if (activeSyncPromise) {
+    console.log("[syncEmployeeDirectory] Sync already in progress — waiting to reuse result");
+    return activeSyncPromise;
+  }
+
+  let resolveActive!: (r: SyncResult) => void;
+  activeSyncPromise = new Promise<SyncResult>((res) => { resolveActive = res; });
+
+  const startTime = Date.now();
+  const triggeredBy = options?.triggeredBy ?? "admin";
+
+  // Determine sync mode: delta if deltaOnly=true AND a previous successful sync exists
+  let syncMode: "FULL" | "DELTA" = "FULL";
+  let deltaAfter: Date | undefined;
+
+  if (options?.deltaOnly) {
+    const lastSuccess = await prisma.syncRecord.findFirst({
+      where: { status: "SUCCESS" },
+      orderBy: { startedAt: "desc" }
+    });
+    if (lastSuccess) {
+      syncMode = "DELTA";
+      deltaAfter = lastSuccess.startedAt;
+    }
+  }
+
+  // Create in-progress sync record
+  const syncRecord = await prisma.syncRecord.create({
+    data: { startedAt: new Date(), syncMode, triggeredBy, status: "RUNNING" }
+  });
+
+  let syncedCount = 0;
+  let updatedCount = 0;
+  let createdCount = 0;
+  let mergedDuplicatesCount = 0;
+  let skippedCount = 0;
+  let conflictCount = 0;
+  const errors: string[] = [];
+  const syncedHubspotIds = new Set<string>();
 
   try {
-    // Fetch HubSpot owners for SM owner ID matching
-    console.log("[syncEmployeeDirectory] Fetching HubSpot owners...");
+    console.log(`[syncEmployeeDirectory] Starting ${syncMode} sync (triggeredBy: ${triggeredBy})`);
+
+    // ── Step 1: Fetch HubSpot owners (for SM owner ID resolution) ────────────
     const owners = await fetchHubSpotOwners();
     const ownersByEmail = new Map<string, string>();
-    owners.forEach((owner) => {
-      if (owner.email) {
-        ownersByEmail.set(owner.email.toLowerCase().trim(), owner.id);
-      }
-    });
-    console.log(`[syncEmployeeDirectory] Loaded ${owners.length} HubSpot owners`);
+    owners.forEach((o) => { if (o.email) ownersByEmail.set(o.email.toLowerCase().trim(), o.id); });
+    console.log(`[syncEmployeeDirectory] ${owners.length} HubSpot owners loaded`);
 
-    // Fetch both VA and Ops Staff populations.
-    const filterGroups = [
-      {
-        filters: [
-          {
-            propertyName: "contact_type",
-            operator: "EQ",
-            value: "Staff Member - Active"
-          }
-        ]
-      },
-      {
-        filters: [
-          {
-            propertyName: "contact_type",
-            operator: "EQ",
-            value: "Ops Staff - Active"
-          }
-        ]
-      }
-    ];
+    // ── Step 2: Fetch contacts from HubSpot ─────────────────────────────────
+    const contacts = await fetchAllStaffContacts(undefined, deltaAfter);
+    console.log(`[syncEmployeeDirectory] ${contacts.length} contacts fetched (${syncMode})`);
 
-    const contacts = await fetchAllStaffContacts(filterGroups);
-    console.log(`[syncEmployeeDirectory] Fetched ${contacts.length} contacts from HubSpot`);
-    console.log(`[syncEmployeeDirectory] Available Prisma models:`, Object.keys(prisma));
-
-    let syncedCount = 0;
-    let skippedCount = 0;
-    const errors: string[] = [];
-
+    // ── Step 3: Process each contact ─────────────────────────────────────────
     for (let i = 0; i < contacts.length; i++) {
       try {
         const contact = contacts[i];
         const props = contact.properties;
-
-        // Required: result.id
         const hubspotId = contact.id;
-        if (!hubspotId) {
-          console.warn(`[syncEmployeeDirectory] Skipping: Contact missing ID at index ${i}`);
-          skippedCount++;
-          continue;
-        }
 
-        // Required: staff_id_number
-        const staffId = props.staff_id_number;
+        if (!hubspotId) { skippedCount++; continue; }
+
+        const staffId = props.staff_id_number?.trim();
         if (!staffId) {
-          console.warn(`[syncEmployeeDirectory] Skipping: Contact ${hubspotId} missing staff_id_number`);
+          console.warn(`[syncEmployeeDirectory] Skipping contact ${hubspotId}: missing staff_id_number`);
           skippedCount++;
           continue;
         }
 
-        // Map all fields (don't skip rows with blank optional fields)
         const firstName = props.firstname || "";
         const lastName = props.lastname || "";
-        const fullName = `${firstName} ${lastName}`.trim();
-        const email = props.email || "";
+        const fullName = [firstName, lastName].filter(Boolean).join(" ").trim();
+        const email = (props.email || "").trim().toLowerCase();
         const contactType = props.contact_type || "";
         const staffRole = props.staff_role || "";
         const smName = props.sm || null;
         const rmName = props.senior_success_manager || null;
 
-        // Parse staff start date
+        // Parse start date
         let staffStartDate: Date | null = null;
-        if (props.staff_start_date) {
-          const dateStr = props.staff_start_date.trim();
-          if (dateStr) {
-            const parsed = new Date(dateStr);
-            if (!isNaN(parsed.getTime())) {
-              staffStartDate = parsed;
-            }
-          }
+        if (props.staff_start_date?.trim()) {
+          const parsed = new Date(props.staff_start_date.trim());
+          if (!isNaN(parsed.getTime())) staffStartDate = parsed;
         }
 
+        // Determine employee type
         let employeeType: EmployeeType | null = null;
-        if (contactType === "Staff Member - Active") {
-          employeeType = "VA";
-        } else if (contactType === "Ops Staff - Active" && staffRole === "Success Manager") {
-          employeeType = "SM";
-        }
+        if (contactType === "Staff Member - Active") employeeType = "VA";
+        else if (contactType === "Ops Staff - Active" && staffRole === "Success Manager") employeeType = "SM";
 
-        // Ignore Ops Staff roles other than Success Manager.
-        if (!employeeType) {
-          skippedCount++;
-          continue;
-        }
+        if (!employeeType) { skippedCount++; continue; }
 
-        // Resolve SM's own owner ID by matching email
+        // Resolve SM owner ID
         let smOwnerId: string | null = null;
         if (employeeType === "SM" && email) {
-          smOwnerId = ownersByEmail.get(email.toLowerCase().trim()) || null;
-          if (!smOwnerId) {
-            console.warn(`[syncEmployeeDirectory] SM ${fullName} (${email}) not found in HubSpot owners`);
-          }
+          smOwnerId = ownersByEmail.get(email) || null;
         }
 
-        // Log first row for verification
-        if (i === 0) {
-          console.log("[syncEmployeeDirectory] First row mapping:", {
-            hubspotId,
-            staffId,
-            fullName,
-            email,
-            contactType,
-            staffRole,
-            smName,
-            smOwnerId,
-            rmName,
-            staffStartDate,
-            employeeType
+        syncedHubspotIds.add(hubspotId);
+
+        // ── Dedup + conflict detection ──────────────────────────────────────
+        // 1. Find existing record by hubspotContactId
+        const existingByHsId = await prisma.employeeDirectory.findUnique({
+          where: { hubspotContactId: hubspotId }
+        });
+
+        // 2. Find existing record by staffId
+        const existingByStaffId = await prisma.employeeDirectory.findUnique({
+          where: { staffId }
+        });
+
+        // Merge internal duplicate representations (same logical employee split
+        // across two rows by hubspotContactId/staffId mismatch).
+        let updateTarget = existingByStaffId ?? existingByHsId ?? null;
+        if (existingByHsId && existingByStaffId && existingByHsId.id !== existingByStaffId.id) {
+          const mergeDescription = `Merged duplicate directory rows for HubSpot ID ${hubspotId}: kept staffId ${existingByStaffId.staffId}, removed staffId ${existingByHsId.staffId}`;
+
+          await prisma.$transaction(async (tx) => {
+            const duplicateComp = await tx.currentCompensation.findUnique({
+              where: { staffId: existingByHsId.staffId }
+            });
+            const keepComp = await tx.currentCompensation.findUnique({
+              where: { staffId: existingByStaffId.staffId }
+            });
+
+            if (duplicateComp && !keepComp) {
+              await tx.currentCompensation.update({
+                where: { staffId: existingByHsId.staffId },
+                data: { staffId: existingByStaffId.staffId }
+              });
+            } else if (duplicateComp && keepComp) {
+              await tx.currentCompensation.delete({
+                where: { staffId: existingByHsId.staffId }
+              });
+            }
+
+            await tx.employeeDirectory.delete({ where: { id: existingByHsId.id } });
+          });
+
+          mergedDuplicatesCount++;
+          console.warn(`[syncEmployeeDirectory] ${mergeDescription}`);
+          await upsertDataQualityIssue(
+            existingByStaffId.staffId,
+            existingByStaffId.fullName,
+            "MERGED_DUPLICATE_DIRECTORY_RECORD",
+            "IDENTITY",
+            "MEDIUM",
+            mergeDescription,
+            {
+              hubspotId,
+              removedStaffId: existingByHsId.staffId,
+              keptStaffId: existingByStaffId.staffId,
+              suggestedFix: "No action required. Duplicate records were merged automatically."
+            }
+          );
+
+          updateTarget = await prisma.employeeDirectory.findUnique({
+            where: { id: existingByStaffId.id }
           });
         }
 
-        // Upsert the record
-        await prisma.employeeDirectory.upsert({
-          where: { staffId },
-          update: {
-            hubspotContactId: hubspotId,
-            fullName,
-            email,
-            contactType,
-            staffRole,
-            smName,
-            smOwnerId,
-            rmName,
-            staffStartDate,
-            employeeType
-          },
-          create: {
-            hubspotContactId: hubspotId,
-            staffId,
-            fullName,
-            email,
-            contactType,
-            staffRole,
-            smName,
-            smOwnerId,
-            rmName,
-            staffStartDate,
-            employeeType
+        // Conflict: email already exists on a different staffId
+        if (email) {
+          const existingByEmail = await prisma.employeeDirectory.findFirst({
+            where: { email: { equals: email, mode: "insensitive" } }
+          });
+          if (existingByEmail && existingByEmail.staffId !== staffId) {
+            const desc = `Email ${email} exists on staffId ${existingByEmail.staffId} but incoming record has staffId ${staffId}`;
+            console.warn(`[syncEmployeeDirectory] Email conflict: ${desc}`);
+            await upsertDataQualityIssue(staffId, fullName, "DUPLICATE_EMAIL", "IDENTITY", "HIGH", desc, {
+              email,
+              conflictingStaffId: existingByEmail.staffId,
+              suggestedFix: "Verify employee identifiers in HubSpot and confirm the correct staff ID."
+            });
+            conflictCount++;
+            // Don't skip — we still update/create by canonical matching
           }
-        });
+        }
 
-        syncedCount++;
-      } catch (error) {
-        const contactId = contacts[i]?.id || "unknown";
-        const errorMessage = error instanceof Error ? error.message : "Unknown error";
-        console.error(
-          `[syncEmployeeDirectory] Error syncing contact ${contactId}:`,
-          errorMessage
-        );
-        errors.push(`Contact ${contactId}: ${errorMessage}`);
+        // ── HubSpot-first update/create behavior ────────────────────────────
+        if (updateTarget) {
+          await prisma.employeeDirectory.update({
+            where: { id: updateTarget.id },
+            data: {
+              hubspotContactId: hubspotId,
+              staffId,
+              fullName,
+              email,
+              contactType,
+              staffRole,
+              smName,
+              smOwnerId,
+              rmName,
+              staffStartDate,
+              employeeType,
+              isEmploymentActive: true
+            }
+          });
+          updatedCount++;
+        } else {
+          await prisma.employeeDirectory.create({
+            data: {
+              hubspotContactId: hubspotId,
+              staffId,
+              fullName,
+              email,
+              contactType,
+              staffRole,
+              smName,
+              smOwnerId,
+              rmName,
+              staffStartDate,
+              employeeType,
+              isEmploymentActive: true
+            }
+          });
+          createdCount++;
+        }
+
+        syncedCount = updatedCount + createdCount;
+      } catch (err) {
+        const contactId = contacts[i]?.id || `index-${i}`;
+        const msg = err instanceof Error ? err.message : "Unknown error";
+        console.error(`[syncEmployeeDirectory] Error at contact ${contactId}: ${msg}`);
+        errors.push(`Contact ${contactId}: sync processing failed`);
+        skippedCount++;
       }
     }
 
-    console.log(
-      `[syncEmployeeDirectory] Sync complete. Synced: ${syncedCount}, Skipped: ${skippedCount}, Total: ${contacts.length}`
-    );
-    return {
+    // ── Step 4 (FULL sync only): mark absent records as employment-inactive ──
+    if (syncMode === "FULL" && syncedHubspotIds.size > 0) {
+      const marked = await prisma.employeeDirectory.updateMany({
+        where: {
+          hubspotContactId: { notIn: [...syncedHubspotIds] },
+          isEmploymentActive: true
+        },
+        data: { isEmploymentActive: false }
+      });
+      if (marked.count > 0) {
+        console.log(`[syncEmployeeDirectory] Marked ${marked.count} record(s) as employment-inactive`);
+        // Log data quality issues for each newly-inactive employee
+        const inactiveRecords = await prisma.employeeDirectory.findMany({
+          where: { hubspotContactId: { notIn: [...syncedHubspotIds] }, isEmploymentActive: false },
+          select: { staffId: true, fullName: true }
+        });
+        for (const rec of inactiveRecords) {
+          await upsertDataQualityIssue(
+            rec.staffId, rec.fullName,
+            "EMPLOYMENT_INACTIVE", "IDENTITY", "MEDIUM",
+            `Employee ${rec.fullName} (${rec.staffId}) was not present in latest HubSpot active sync`,
+            {}
+          );
+        }
+      }
+    }
+
+    const durationMs = Date.now() - startTime;
+    await prisma.syncRecord.update({
+      where: { id: syncRecord.id },
+      data: {
+        completedAt: new Date(),
+        status: "SUCCESS",
+        syncedCount,
+        skippedCount,
+        errorCount: errors.length,
+        conflictCount,
+        durationMs
+      }
+    });
+
+    console.log(`[syncEmployeeDirectory] Done. Synced=${syncedCount} Updated=${updatedCount} Created=${createdCount} MergedDuplicates=${mergedDuplicatesCount} Skipped=${skippedCount} Conflicts=${conflictCount} Errors=${errors.length}`);
+
+    // ── Step 5: Refresh Working Data for all synced employees ────────────────
+    // This is non-blocking for the sync result — use fire-and-forget for large
+    // full syncs, but we await here to ensure data is fresh before the response.
+    const syncedStaffIds = [...syncedHubspotIds].reduce<string[]>((ids, hsId) => {
+      return ids;
+    }, []);
+    // Collect staff IDs that were actually processed during this sync run
+    // by querying all active employees (faster than tracking per-contact above)
+    try {
+      const activeEmployees = await prisma.employeeDirectory.findMany({
+        where: { isEmploymentActive: true },
+        select: { staffId: true }
+      });
+      const allActiveStaffIds = activeEmployees.map((e) => e.staffId);
+      // Run refresh asynchronously to not block the sync response
+      refreshWorkingDataForEmployees(allActiveStaffIds).catch((err) => {
+        console.warn(`[syncEmployeeDirectory] Working Data background refresh failed: ${err instanceof Error ? err.message : err}`);
+      });
+      console.log(`[syncEmployeeDirectory] Working Data refresh queued for ${allActiveStaffIds.length} employees`);
+    } catch (err) {
+      console.warn(`[syncEmployeeDirectory] Could not queue Working Data refresh: ${err instanceof Error ? err.message : err}`);
+    }
+
+    const finalResult: SyncResult = {
       result: "success",
       synced: syncedCount,
+      updated: updatedCount,
+      created: createdCount,
+      mergedDuplicates: mergedDuplicatesCount,
       skipped: skippedCount,
+      conflicts: conflictCount,
       errors,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      mode: syncMode,
+      durationMs
     };
+
+    resolveActive(finalResult);
+    return finalResult;
+
   } catch (error) {
+    const durationMs = Date.now() - startTime;
     const errorMsg = error instanceof Error ? error.message : "Unknown error";
     console.error(`[syncEmployeeDirectory] Fatal error: ${errorMsg}`);
-    throw error;
+
+    await prisma.syncRecord.update({
+      where: { id: syncRecord.id },
+      data: {
+        completedAt: new Date(),
+        status: "FAILED",
+        errorMessage: errorMsg,
+        durationMs
+      }
+    }).catch(() => {});
+
+    const failResult: SyncResult = {
+      result: "failed",
+      synced: 0,
+      updated: 0,
+      created: 0,
+      mergedDuplicates: 0,
+      skipped: 0,
+      conflicts: 0,
+      errors: ["Directory sync failed. Check server logs for details."],
+      timestamp: new Date().toISOString(),
+      mode: syncMode,
+      durationMs
+    };
+
+    resolveActive(failResult);
+    return failResult;
+  } finally {
+    activeSyncPromise = null;
+  }
+}
+
+/**
+ * Upsert a DataQualityIssue (auto-resolves a prior open issue of same type+staffId if now gone).
+ * Creates or updates the first matching open issue.
+ */
+async function upsertDataQualityIssue(
+  staffId: string | null,
+  employeeName: string | null,
+  issueType: string,
+  category: string,
+  severity: string,
+  description: string,
+  metadata: Record<string, unknown>
+): Promise<void> {
+  try {
+    const existing = await prisma.dataQualityIssue.findFirst({
+      where: {
+        staffId: staffId ?? undefined,
+        issueType,
+        status: { in: ["OPEN", "NEEDS_ADMIN_REVIEW"] }
+      }
+    });
+
+    if (existing) {
+      await prisma.dataQualityIssue.update({
+        where: { id: existing.id },
+        data: { description, metadata: metadata as Prisma.InputJsonValue, detectedAt: new Date() }
+      });
+    } else {
+      await prisma.dataQualityIssue.create({
+        data: { staffId, employeeName, issueType, category, severity, description, metadata: metadata as Prisma.InputJsonValue, status: "OPEN" }
+      });
+    }
+  } catch (err) {
+    console.warn(`[upsertDataQualityIssue] Failed to log issue: ${err instanceof Error ? err.message : err}`);
   }
 }
 

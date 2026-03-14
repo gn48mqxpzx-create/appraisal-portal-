@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { ViewerSession } from '../../utils/auth';
 import styles from '../AdminConsole.module.css';
 
@@ -6,17 +6,37 @@ interface DataOperationsTabProps {
   viewerSession: ViewerSession | null;
 }
 
-interface DirectorySyncStatus {
+interface LiveSyncStatus {
+  id: string;
+  startedAt: string;
+  completedAt: string | null;
+  syncMode: string;
+  triggeredBy: string;
+  status: string;
+  syncedCount: number;
+  skippedCount: number;
+  errorCount: number;
+  conflictCount: number;
+  durationMs: number | null;
+}
+
+interface SessionSyncResult {
   lastResult: 'Success' | 'Failed';
   synced: number;
+  updated: number;
+  created: number;
+  mergedDuplicates: number;
   skipped: number;
+  conflicts: number;
   errors: string[];
   timestamp: string;
+  mode: string;
 }
 
 export function DataOperationsTab({ viewerSession }: DataOperationsTabProps) {
   const [isSyncing, setIsSyncing] = useState(false);
-  const [syncStatus, setSyncStatus] = useState<DirectorySyncStatus | null>(null);
+  const [liveSyncStatus, setLiveSyncStatus] = useState<LiveSyncStatus | null>(null);
+  const [sessionSyncResult, setSessionSyncResult] = useState<SessionSyncResult | null>(null);
 
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isUploadingComp, setIsUploadingComp] = useState(false);
@@ -31,45 +51,76 @@ export function DataOperationsTab({ viewerSession }: DataOperationsTabProps) {
 
   const isAdmin = viewerSession?.role === 'Admin';
 
-  const handleRunDirectorySync = async () => {
-    if (!isAdmin || isSyncing) {
-      return;
-    }
+  // Fetch last sync record on mount
+  useEffect(() => {
+    if (!isAdmin) return;
+    fetch('http://localhost:3001/admin/sync-status', {
+      headers: { Authorization: `Bearer ${localStorage.getItem('auth_token') || ''}` }
+    })
+      .then((r) => r.json())
+      .then((body) => { if (body?.data) setLiveSyncStatus(body.data); })
+      .catch(() => {});
+  }, [isAdmin]);
 
+  const handleRunDirectorySync = async () => {
+    if (!isAdmin || isSyncing) return;
     setIsSyncing(true);
 
     try {
       const response = await fetch('http://localhost:3001/directory/sync', {
-        method: 'POST'
+        method: 'POST',
+        headers: { Authorization: `Bearer ${localStorage.getItem('auth_token') || ''}` }
       });
       const data = await response.json();
 
       if (!response.ok) {
-        const detail = data?.details || data?.error || 'Sync request failed';
-        setSyncStatus({
+        setSessionSyncResult({
           lastResult: 'Failed',
           synced: 0,
+          updated: 0,
+          created: 0,
+          mergedDuplicates: 0,
           skipped: 0,
-          errors: [detail],
-          timestamp: new Date().toISOString()
+          conflicts: 0,
+          errors: ['Directory sync failed. Check server logs.'],
+          timestamp: new Date().toISOString(),
+          mode: 'FULL'
         });
         return;
       }
 
-      setSyncStatus({
+      setSessionSyncResult({
         lastResult: 'Success',
         synced: Number(data?.synced ?? 0),
+        updated: Number(data?.updated ?? 0),
+        created: Number(data?.created ?? 0),
+        mergedDuplicates: Number(data?.mergedDuplicates ?? 0),
         skipped: Number(data?.skipped ?? 0),
+        conflicts: Number(data?.conflicts ?? 0),
         errors: Array.isArray(data?.errors) ? data.errors : [],
-        timestamp: data?.timestamp || new Date().toISOString()
+        timestamp: data?.timestamp || new Date().toISOString(),
+        mode: data?.mode || 'FULL'
       });
-    } catch (error) {
-      setSyncStatus({
+
+      // Refresh live sync status
+      fetch('http://localhost:3001/admin/sync-status', {
+        headers: { Authorization: `Bearer ${localStorage.getItem('auth_token') || ''}` }
+      })
+        .then((r) => r.json())
+        .then((body) => { if (body?.data) setLiveSyncStatus(body.data); })
+        .catch(() => {});
+    } catch (_error) {
+      setSessionSyncResult({
         lastResult: 'Failed',
         synced: 0,
+        updated: 0,
+        created: 0,
+        mergedDuplicates: 0,
         skipped: 0,
-        errors: [error instanceof Error ? error.message : 'Unexpected error'],
-        timestamp: new Date().toISOString()
+        conflicts: 0,
+        errors: ['Directory sync failed. Check server logs.'],
+        timestamp: new Date().toISOString(),
+        mode: 'FULL'
       });
     } finally {
       setIsSyncing(false);
@@ -139,17 +190,28 @@ export function DataOperationsTab({ viewerSession }: DataOperationsTabProps) {
         </div>
 
         <div className={styles.statusPanel}>
-          {syncStatus ? (
+          {liveSyncStatus && !sessionSyncResult && (
             <div className={styles.statusGrid}>
-              <p className={styles.statusText}><strong>Last result:</strong> {syncStatus.lastResult}</p>
-              <p className={styles.statusText}><strong>Synced count:</strong> {syncStatus.synced}</p>
-              <p className={styles.statusText}><strong>Skipped count:</strong> {syncStatus.skipped}</p>
-              <p className={styles.statusText}><strong>Timestamp:</strong> {new Date(syncStatus.timestamp).toLocaleString()}</p>
-              <p className={styles.statusText}><strong>Errors:</strong> {syncStatus.errors.length ? syncStatus.errors.join(' | ') : 'None'}</p>
+              <p className={styles.statusText}><strong>Last sync:</strong> {liveSyncStatus.completedAt ? new Date(liveSyncStatus.completedAt).toLocaleString() : '—'}</p>
+              <p className={styles.statusText}><strong>Mode:</strong> {liveSyncStatus.syncMode}</p>
+              <p className={styles.statusText}><strong>Status:</strong> {liveSyncStatus.status}</p>
+              <p className={styles.statusText}><strong>Synced:</strong> {liveSyncStatus.syncedCount} · <strong>Skipped:</strong> {liveSyncStatus.skippedCount} · <strong>Conflicts:</strong> {liveSyncStatus.conflictCount}</p>
+              {liveSyncStatus.errorCount > 0 && <p className={styles.statusText}><strong>Errors:</strong> {liveSyncStatus.errorCount}</p>}
             </div>
-          ) : (
-            <p className={styles.emptyState}>No sync has been run yet in this session.</p>
           )}
+          {sessionSyncResult ? (
+            <div className={styles.statusGrid}>
+              <p className={styles.statusText}><strong>Last result:</strong> {sessionSyncResult.lastResult}</p>
+              <p className={styles.statusText}><strong>Mode:</strong> {sessionSyncResult.mode}</p>
+              <p className={styles.statusText}><strong>Synced:</strong> {sessionSyncResult.synced}</p>
+              <p className={styles.statusText}><strong>Updated:</strong> {sessionSyncResult.updated} · <strong>Created:</strong> {sessionSyncResult.created}</p>
+              <p className={styles.statusText}><strong>Merged duplicates:</strong> {sessionSyncResult.mergedDuplicates} · <strong>Skipped:</strong> {sessionSyncResult.skipped} · <strong>Conflicts:</strong> {sessionSyncResult.conflicts}</p>
+              <p className={styles.statusText}><strong>Timestamp:</strong> {new Date(sessionSyncResult.timestamp).toLocaleString()}</p>
+              {sessionSyncResult.errors.length > 0 && <p className={styles.statusText}><strong>Errors:</strong> {sessionSyncResult.errors.join(' | ')}</p>}
+            </div>
+          ) : !liveSyncStatus ? (
+            <p className={styles.emptyState}>No sync has been run yet.</p>
+          ) : null}
         </div>
       </section>
 

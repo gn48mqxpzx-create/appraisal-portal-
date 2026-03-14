@@ -1,4 +1,5 @@
 import { CaseStatus, PrismaClient, type Prisma } from "@prisma/client";
+import { resolveRmScope, resolveSmScope } from "./hierarchyResolutionService";
 
 const prisma = new PrismaClient();
 const CASE_STATUSES = new Set(Object.values(CaseStatus));
@@ -71,15 +72,6 @@ export type ScopedEmployeeCaseRecord = {
     | null;
 };
 
-const normalizeIdentifier = (value: string | null | undefined): string => value?.trim() ?? "";
-const toIdentifierSet = (values: Array<string | null | undefined>) =>
-  [...new Set(values.map((value) => normalizeIdentifier(value).toLowerCase()).filter(Boolean))];
-
-const buildViewerIdentifiers = (user: ScopedEmployeeUser): string[] =>
-  toIdentifierSet([user.email, user.id, user.name]);
-
-const buildSuccessManagerIdentifiers = (user: ScopedEmployeeUser): string[] => buildViewerIdentifiers(user);
-
 export const normalizeScopedRole = (role: string): ScopedEmployeeRole | null => {
   const normalized = role.trim().toUpperCase();
 
@@ -102,117 +94,32 @@ export const normalizeScopedRole = (role: string): ScopedEmployeeRole | null => 
   return null;
 };
 
-const toInsensitiveEquals = (field: "staffId" | "fullName" | "email" | "smOwnerId" | "smName" | "rmName", values: string[]) =>
-  values.map((value) => ({
-    [field]: {
-      equals: value,
-      mode: "insensitive" as const
-    }
-  }));
-
-const getSmRecordsForViewer = async (viewerIdentifiers: string[]) => {
-  if (viewerIdentifiers.length === 0) {
-    return [];
-  }
-
-  return prisma.employeeDirectory.findMany({
-    where: {
-      employeeType: "SM",
-      OR: [
-        ...toInsensitiveEquals("email", viewerIdentifiers),
-        ...toInsensitiveEquals("fullName", viewerIdentifiers),
-        ...toInsensitiveEquals("staffId", viewerIdentifiers),
-        ...toInsensitiveEquals("smOwnerId", viewerIdentifiers)
-      ]
-    },
-    select: {
-      staffId: true,
-      fullName: true,
-      email: true,
-      smOwnerId: true
-    }
-  });
-};
-
-const getSmRecordsForRm = async (rmIdentifiers: string[]) => {
-  if (rmIdentifiers.length === 0) {
-    return [];
-  }
-
-  return prisma.employeeDirectory.findMany({
-    where: {
-      employeeType: "SM",
-      OR: [
-        ...toInsensitiveEquals("rmName", rmIdentifiers),
-        ...toInsensitiveEquals("smName", rmIdentifiers)
-      ]
-    },
-    select: {
-      staffId: true,
-      fullName: true,
-      email: true,
-      smOwnerId: true
-    }
-  });
-};
-
-const getVaStaffIdsForSmIdentifiers = async (
-  smIdentifiers: string[],
-  rmIdentifiers: string[] = []
-): Promise<string[]> => {
-  if (smIdentifiers.length === 0 && rmIdentifiers.length === 0) {
-    return [];
-  }
-
-  const rows = await prisma.employeeDirectory.findMany({
-    where: {
-      employeeType: "VA",
-      OR: [
-        ...toInsensitiveEquals("smName", smIdentifiers),
-        ...toInsensitiveEquals("rmName", rmIdentifiers)
-      ]
-    },
-    select: {
-      staffId: true
-    }
-  });
-
-  return [...new Set(rows.map((row) => row.staffId).filter(Boolean))];
-};
-
-const buildSmIdentifierSet = (
-  smRecords: Array<{
-    staffId: string;
-    fullName: string;
-    email: string;
-    smOwnerId: string | null;
-  }>
-): string[] =>
-  toIdentifierSet(
-    smRecords.flatMap((record) => [record.staffId, record.fullName, record.email, record.smOwnerId])
-  );
-
 export async function getHierarchyForRM(user: ScopedEmployeeUser): Promise<ScopedHierarchy> {
-  const rmIdentifiers = buildViewerIdentifiers(user);
-  const smRecords = await getSmRecordsForRm(rmIdentifiers);
-  const smIdentifiers = buildSmIdentifierSet(smRecords);
-  const vaStaffIds = await getVaStaffIdsForSmIdentifiers(smIdentifiers, rmIdentifiers);
+  const hierarchy = await resolveRmScope({
+    role: user.role,
+    name: user.name,
+    email: user.email,
+    id: user.id
+  });
 
   return {
-    vaStaffIds,
-    smIdentifiers,
-    rmIdentifiers
+    vaStaffIds: hierarchy.scopedStaffIds,
+    smIdentifiers: hierarchy.smIdentifiers,
+    rmIdentifiers: hierarchy.rmIdentifiers
   };
 }
 
 const getHierarchyForSM = async (user: ScopedEmployeeUser): Promise<ScopedHierarchy> => {
-  const smRecords = await getSmRecordsForViewer(buildViewerIdentifiers(user));
-  const smIdentifiers = buildSmIdentifierSet(smRecords);
-  const vaStaffIds = await getVaStaffIdsForSmIdentifiers(smIdentifiers);
+  const hierarchy = await resolveSmScope({
+    role: user.role,
+    name: user.name,
+    email: user.email,
+    id: user.id
+  });
 
   return {
-    vaStaffIds,
-    smIdentifiers,
+    vaStaffIds: hierarchy.scopedStaffIds,
+    smIdentifiers: hierarchy.smIdentifiers,
     rmIdentifiers: []
   };
 };
@@ -281,10 +188,9 @@ export async function getScopedCaseWhere(
   }
 
   if (scopedRole === "SUCCESS_MANAGER") {
-    const directIdentifiers = buildSuccessManagerIdentifiers(user);
     const hierarchy = await getHierarchyForSM(user);
 
-    const smIdentifierConditions = [...new Set([...directIdentifiers, ...hierarchy.smIdentifiers])].map((identifier) => ({
+    const smIdentifierConditions = [...new Set(hierarchy.smIdentifiers)].map((identifier) => ({
       successManagerStaffId: {
         equals: identifier,
         mode: "insensitive" as const
