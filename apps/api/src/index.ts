@@ -37,7 +37,7 @@ import {
 import { ALLOWED_APPRAISAL_CONTACT_TYPES, getScopedCaseWhere, getScopedEmployees } from "./services/employeeScopeService";
 import { resolveViewerHierarchy } from "./services/hierarchyResolutionService";
 import { getLatestWsllEligibilityByStaffIds } from "./services/wsllEligibilityService";
-import { getSMDirectory, resolveManagerNamesForCases, getLastSyncRecord } from "./services/employeeDirectoryService";
+import { getSMDirectory, resolveManagerNamesForCases, getLastSyncRecord, getSyncHistory } from "./services/employeeDirectoryService";
 import { resolveViewerByEmail, ViewerNotFoundError } from "./services/viewerResolutionService";
 import {
   getAppraisalCategoryBreakdownForCases,
@@ -54,6 +54,14 @@ import {
   refreshWorkingDataForEmployees,
   workingDataToClassification
 } from "./services/employeeWorkingDataService";
+import {
+  exportLearnedRecords,
+  getLearnedDataSnapshotPath,
+  importLearnedRecords,
+  initializeLearnedDataPersistence,
+  reapplyLearnedRecordsAfterRebuild,
+  validateLearnedDataTargets
+} from "./services/learnedDataPersistenceService";
 
 const app = express();
 const port = Number(process.env.API_PORT ?? 3001);
@@ -1190,34 +1198,11 @@ app.get("/cases", async (req: Request, res: Response) => {
     });
 
     const staffIds = [...new Set(cases.map((c) => c.staffId))];
-    const latestWsllByStaff = await getLatestWsllEligibilityByStaffIds(staffIds);
-    const classificationByCaseId = await getAppraisalClassificationForCases(cases.map((c) => c.id));
-    const currentCompensations = await prisma.currentCompensation.findMany({
-      where: {
-        staffId: {
-          in: staffIds
-        }
-      },
-      select: {
-        staffId: true,
-        currentCompensation: true
-      }
-    });
-    const currentCompensationByStaffId = new Map(
-      currentCompensations.map((row) => [row.staffId, Number(row.currentCompensation)])
-    );
-
-    // Batch-resolve SM and RM display names using fallback chain
-    const managerNamesMap = await resolveManagerNamesForCases(
-      cases.map((c) => ({
-        staffId: c.staffId,
-        directSmValue: c.successManagerStaffId,
-        directRmValue: c.relationshipManagerStaffId
-      }))
-    );
+    const workingDataByStaffId = await getWorkingDataBatch(staffIds);
 
     const items = cases.map((c) => {
-      const currentBase = currentCompensationByStaffId.get(c.staffId) ?? Number(c.compCurrent?.baseSalary || 0);
+      const wd = workingDataByStaffId.get(c.staffId);
+      const currentBase = wd?.currentCompensation ?? Number(c.compCurrent?.baseSalary || 0);
       const submittedTargetSalary =
         c.recommendation?.submittedTargetSalary !== null && c.recommendation?.submittedTargetSalary !== undefined
           ? Number(c.recommendation.submittedTargetSalary)
@@ -1250,30 +1235,36 @@ app.get("/cases", async (req: Request, res: Response) => {
         }
       }
 
-      const wsllEligibility = latestWsllByStaff.get(c.staffId) ?? {
-        status: "MISSING_WSLL",
-        averageWsll: null,
-        blockerMessage: "WSLL data is required before a recommendation can be created."
-      };
-
-      const resolvedManagers = managerNamesMap.get(c.staffId);
-      const classification = classificationByCaseId.get(c.id) ?? null;
+      const wsllGateStatus: "PASS" | "MISSING_WSLL" | "WSLL_BELOW_THRESHOLD" =
+        wd?.wsllReason === "PASS"
+          ? "PASS"
+          : wd?.wsllReason === "BELOW_THRESHOLD"
+            ? "WSLL_BELOW_THRESHOLD"
+            : "MISSING_WSLL";
+      const wsllBlockerMessage =
+        wsllGateStatus === "PASS"
+          ? null
+          : wsllGateStatus === "WSLL_BELOW_THRESHOLD"
+            ? "Average WSLL is below 2.8."
+            : "WSLL data is required before a recommendation can be created.";
+      const classification = wd ? workingDataToClassification(c.id, wd) : null;
 
       return {
         id: c.id,
         staff_id: c.staffId,
         full_name: c.fullName,
-        staff_role: c.staffRole,
+        staff_role: wd?.hubspotRole ?? c.staffRole,
+        normalized_role: wd?.normalizedRole ?? null,
         contact_type: c.contactType,
-        success_manager: resolvedManagers?.smName ?? null,
-        relationship_manager: resolvedManagers?.rmName ?? null,
+        success_manager: wd?.successManagerName ?? null,
+        relationship_manager: wd?.reportingManagerName ?? null,
         status: c.status,
         created_at: c.createdAt,
         updated_at: c.updatedAt,
         closed_at: c.closeDate,
-        wsll_gate_status: wsllEligibility.status,
-        wsll_average: wsllEligibility.averageWsll,
-        wsll_blocker_message: wsllEligibility.blockerMessage,
+        wsll_gate_status: wsllGateStatus,
+        wsll_average: wd?.latestWsllAverage ?? null,
+        wsll_blocker_message: wsllBlockerMessage,
         appraisal_classification: classification,
         proposed_increase_amount: finalIncreaseAmount ?? submittedIncreaseAmount,
         final_new_base: finalNewBase
@@ -1494,6 +1485,19 @@ app.get("/cases/benchmark/:staffId", async (req: Request, res: Response) => {
     const formatMoney = (v: number | null): string | null =>
       v == null ? null : String(v);
 
+    const benchmarkStatus: BenchmarkStatus =
+      wd.marketMatrixStatus === "READY"
+        ? "READY"
+        : wd.marketMatrixStatus === "MISSING_COMP"
+          ? "MISSING_CURRENT_COMPENSATION"
+          : wd.marketMatrixStatus === "MISSING_MATRIX"
+            ? "MISSING_MARKET_MATRIX"
+            : wd.marketMatrixStatus === "MISSING_ROLE"
+              ? "MISSING_ROLE_MAPPING"
+              : wd.startDate
+                ? "MISSING_ROLE_MAPPING"
+                : "MISSING_START_DATE";
+
     const basePayload = {
       staffId,
       fullName: wd.fullName || caseRecord.fullName || staffId,
@@ -1527,7 +1531,7 @@ app.get("/cases/benchmark/:staffId", async (req: Request, res: Response) => {
       gapToMidpoint: wd.marketMatrixMin !== null && wd.marketMatrixMax !== null && wd.currentCompensation !== null
         ? formatMoney(((wd.marketMatrixMin + wd.marketMatrixMax) / 2) - wd.currentCompensation)
         : null,
-      benchmarkStatus: (wd.marketMatrixStatus ?? "MISSING_ROLE_MAPPING") as BenchmarkStatus
+      benchmarkStatus
     };
 
     return res.status(200).json({ success: true, data: basePayload });
@@ -3854,6 +3858,54 @@ const getMatrixRoleName = (row: { roleName: string; standardizedRole?: { roleNam
 const getMappedRoleName = (mapping: { mappedRoleName: string; standardizedRole?: { roleName: string } | null }) =>
   mapping.standardizedRole?.roleName ?? mapping.mappedRoleName;
 
+const refreshWorkingDataForSourceRole = async (sourceRoleName: string): Promise<void> => {
+  const rawRole = sourceRoleName.trim();
+  if (!rawRole) {
+    return;
+  }
+
+  const impacted = await prisma.employeeDirectory.findMany({
+    where: {
+      isEmploymentActive: true,
+      staffRole: { equals: rawRole, mode: "insensitive" }
+    },
+    select: { staffId: true }
+  });
+
+  const impactedStaffIds = impacted.map((row) => row.staffId);
+  if (impactedStaffIds.length > 0) {
+    await refreshWorkingDataForEmployees(impactedStaffIds);
+  }
+};
+
+const refreshWorkingDataForStandardizedRole = async (payload: {
+  standardizedRoleId?: string | null;
+  roleName?: string | null;
+}): Promise<void> => {
+  const roleName = payload.roleName?.trim() || null;
+  const rolePredicates: Prisma.EmployeeWorkingDataWhereInput[] = [
+    ...(payload.standardizedRoleId ? [{ standardizedRoleId: payload.standardizedRoleId }] : []),
+    ...(roleName ? [{ normalizedRole: { equals: roleName, mode: "insensitive" as const } }] : [])
+  ];
+
+  if (rolePredicates.length === 0) {
+    return;
+  }
+
+  const rows = await prisma.employeeWorkingData.findMany({
+    where: {
+      isActiveForAppraisal: true,
+      OR: rolePredicates
+    },
+    select: { staffId: true }
+  });
+
+  const staffIds = rows.map((row) => row.staffId);
+  if (staffIds.length > 0) {
+    await refreshWorkingDataForEmployees(staffIds);
+  }
+};
+
 const roleSimilarity = (rawRole: string, standardRole: string): number => {
   const raw = normalizeRoleName(rawRole);
   const target = normalizeRoleName(standardRole);
@@ -4099,6 +4151,11 @@ app.post("/market-matrix", express.json(), async (req, res) => {
       include: { standardizedRole: true }
     });
 
+    await refreshWorkingDataForStandardizedRole({
+      standardizedRoleId: row.standardizedRoleId,
+      roleName: row.roleName
+    });
+
     return res.status(200).json({
       success: true,
       data: withRole
@@ -4193,6 +4250,11 @@ app.put("/market-matrix/:id", express.json(), async (req, res) => {
       include: { standardizedRole: true }
     });
 
+    await refreshWorkingDataForStandardizedRole({
+      standardizedRoleId: updated.standardizedRoleId,
+      roleName: updated.roleName
+    });
+
     return res.status(200).json({
       success: true,
       data: withRole
@@ -4225,6 +4287,10 @@ app.delete("/market-matrix/:id", async (req, res) => {
     }
 
     await prisma.marketValueMatrix.delete({ where: { id } });
+    await refreshWorkingDataForStandardizedRole({
+      standardizedRoleId: existing.standardizedRoleId,
+      roleName: existing.roleName
+    });
     return res.status(200).json({ success: true });
   } catch (error) {
     return res.status(500).json({ error: error instanceof Error ? error.message : "Failed to delete market matrix row" });
@@ -4258,6 +4324,11 @@ app.delete("/market-matrix/role/:role", async (req, res) => {
           { roleName: { equals: standardizedRole.roleName, mode: "insensitive" } }
         ]
       }
+    });
+
+    await refreshWorkingDataForStandardizedRole({
+      standardizedRoleId: standardizedRole.id,
+      roleName: standardizedRole.roleName
     });
 
     return res.status(200).json({ success: true, deletedCount: deleted.count });
@@ -4352,6 +4423,11 @@ app.post("/market-matrix/role", express.json(), async (req, res) => {
           });
         })
       );
+    });
+
+    await refreshWorkingDataForStandardizedRole({
+      standardizedRoleId: standardizedRole.id,
+      roleName: standardizedRole.roleName
     });
 
     return res.status(200).json({
@@ -4655,6 +4731,11 @@ app.post("/role-library/approve", express.json(), async (req, res) => {
       }
     });
 
+    await refreshWorkingDataForSourceRole(sourceRoleName);
+    await exportLearnedRecords().catch(() => {
+      // non-fatal: role mapping is already persisted in DB
+    });
+
     return res.status(200).json({
       success: true,
       data: await prisma.roleAlignmentMapping.findUnique({
@@ -4704,6 +4785,11 @@ app.put("/role-library/mappings/:id", express.json(), async (req, res) => {
       }
     });
 
+    await refreshWorkingDataForSourceRole(existingMapping.sourceRoleName);
+    await exportLearnedRecords().catch(() => {
+      // non-fatal: role mapping is already persisted in DB
+    });
+
     return res.status(200).json({
       success: true,
       data: await prisma.roleAlignmentMapping.findUnique({
@@ -4737,6 +4823,17 @@ app.post("/role-library/mappings/reassign", express.json(), async (req, res) => 
         standardizedRoleId: toRoleId,
         matchSource: "ADMIN_CONFIRMED"
       }
+    });
+
+    const affectedMappings = await prisma.roleAlignmentMapping.findMany({
+      where: { standardizedRoleId: toRoleId },
+      select: { sourceRoleName: true }
+    });
+    for (const mapping of affectedMappings) {
+      await refreshWorkingDataForSourceRole(mapping.sourceRoleName);
+    }
+    await exportLearnedRecords().catch(() => {
+      // non-fatal: role mappings are already persisted in DB
     });
 
     return res.status(200).json({ success: true, data: { updatedCount: reassigned.count } });
@@ -4789,6 +4886,9 @@ app.post("/role-library/rematch/:mappingId", async (req, res) => {
         matchSource,
         confidenceScore
       }
+    });
+    await exportLearnedRecords().catch(() => {
+      // non-fatal: rematch update is already persisted in DB
     });
 
     return res.status(200).json({
@@ -4964,6 +5064,63 @@ app.get("/admin/sync-status", requireAuth, async (_req, res) => {
   }
 });
 
+// GET /admin/sync-history — returns recent SyncRecord rows
+app.get("/admin/sync-history", requireAuth, async (req, res) => {
+  try {
+    const limit = Math.max(1, Math.min(100, Number(req.query.limit ?? 25)));
+    const rows = await getSyncHistory(limit);
+    return res.json({ data: rows });
+  } catch {
+    return res.status(500).json({ error: { message: "Failed to fetch sync history" } });
+  }
+});
+
+// GET /admin/learned-data/status — snapshot path + mapping validation
+app.get("/admin/learned-data/status", requireAuth, async (_req, res) => {
+  try {
+    const validation = await validateLearnedDataTargets();
+    return res.json({
+      data: {
+        snapshotPath: getLearnedDataSnapshotPath(),
+        validation
+      }
+    });
+  } catch {
+    return res.status(500).json({ error: { message: "Failed to get learned data status" } });
+  }
+});
+
+// POST /admin/learned-data/export — write snapshot file for protected learned data
+app.post("/admin/learned-data/export", requireAuth, async (_req, res) => {
+  try {
+    const exported = await exportLearnedRecords();
+    return res.json({ data: exported });
+  } catch {
+    return res.status(500).json({ error: { message: "Failed to export learned data snapshot" } });
+  }
+});
+
+// POST /admin/learned-data/import — import snapshot back into master tables
+app.post("/admin/learned-data/import", requireAuth, async (_req, res) => {
+  try {
+    const imported = await importLearnedRecords();
+    const reapplied = await reapplyLearnedRecordsAfterRebuild();
+    return res.json({ data: { imported, reapplied } });
+  } catch {
+    return res.status(500).json({ error: { message: "Failed to import learned data snapshot" } });
+  }
+});
+
+// POST /admin/learned-data/reapply — force reapply of learned records after rebuild/sync
+app.post("/admin/learned-data/reapply", requireAuth, async (_req, res) => {
+  try {
+    const result = await reapplyLearnedRecordsAfterRebuild();
+    return res.json({ data: result });
+  } catch {
+    return res.status(500).json({ error: { message: "Failed to reapply learned data" } });
+  }
+});
+
 // ============================================================================
 // ADMIN — Data Quality
 // ============================================================================
@@ -5026,11 +5183,14 @@ app.post("/admin/data-quality/run", requireAuth, async (_req, res) => {
 app.post("/admin/working-data/refresh", requireAuth, async (_req, res) => {
   try {
     const result = await refreshAllWorkingData();
+    const learnedReapply = await reapplyLearnedRecordsAfterRebuild();
+    await exportLearnedRecords();
     return res.json({
       data: {
         saved: result.saved,
         errors: result.errors,
-        message: `Working Data rebuilt for ${result.saved} employee(s). ${result.errors} error(s).`
+        learnedReapply,
+        message: `Working Data rebuilt for ${result.saved} employee(s). ${result.errors} error(s). Learned mappings and overrides were reapplied.`
       }
     });
   } catch {
@@ -5071,6 +5231,17 @@ app.get("/admin/working-data/exceptions", requireAuth, async (_req, res) => {
     return res.status(500).json({ error: { message: "Failed to load Working Data exceptions" } });
   }
 });
+
+initializeLearnedDataPersistence()
+  .then((result) => {
+    console.log(`[learnedDataPersistence] Initialized (imported=${result.imported}) from ${result.snapshotPath}`);
+    if (result.validation.invalidMappings > 0) {
+      console.warn(`[learnedDataPersistence] ${result.validation.invalidMappings} mapping(s) reference invalid targets`);
+    }
+  })
+  .catch((error) => {
+    console.warn(`[learnedDataPersistence] Initialization skipped: ${error instanceof Error ? error.message : error}`);
+  });
 
 app.listen(port, () => {
   console.log(`API listening on http://localhost:${port}`);

@@ -35,10 +35,6 @@ const SEVERITY_STYLES: Record<string, string> = {
   LOW: 'chipNeutral'
 };
 
-const CATEGORIES = ['', 'IDENTITY', 'HIERARCHY', 'ROLE', 'COMPENSATION', 'WSLL', 'APPRAISAL'];
-const SEVERITIES = ['', 'HIGH', 'MEDIUM', 'LOW'];
-const STATUSES = ['OPEN', 'NEEDS_ADMIN_REVIEW', '', 'AUTO_RESOLVED', 'RESOLVED'];
-
 function formatLabel(v: string) {
   return v.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 }
@@ -58,17 +54,13 @@ function getSuggestedFix(issue: DQIssue): string {
 export function DataQualityTab({ viewerSession }: DataQualityTabProps) {
   const [summary, setSummary] = useState<DQSummary | null>(null);
   const [issues, setIssues] = useState<DQIssue[]>([]);
-  const [total, setTotal] = useState(0);
-  const [page, setPage] = useState(1);
-  const [filterCategory, setFilterCategory] = useState('');
-  const [filterSeverity, setFilterSeverity] = useState('');
-  const [filterStatus, setFilterStatus] = useState('OPEN');
   const [isRunningChecks, setIsRunningChecks] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [runMessage, setRunMessage] = useState<string | null>(null);
 
   const authHeader = { Authorization: `Bearer ${localStorage.getItem('auth_token') || ''}` };
   const isAdmin = viewerSession?.role === 'Admin';
-  const LIMIT = 50;
+  const LIMIT = 200;
 
   const fetchSummary = useCallback(() => {
     if (!isAdmin) return;
@@ -81,20 +73,16 @@ export function DataQualityTab({ viewerSession }: DataQualityTabProps) {
   const fetchIssues = useCallback(() => {
     if (!isAdmin) return;
     setLoading(true);
-    const params = new URLSearchParams({ page: String(page), limit: String(LIMIT) });
-    if (filterCategory) params.set('category', filterCategory);
-    if (filterSeverity) params.set('severity', filterSeverity);
-    if (filterStatus) params.set('status', filterStatus);
+    const params = new URLSearchParams({ page: '1', limit: String(LIMIT), status: 'OPEN' });
 
     fetch(`http://localhost:3001/admin/data-quality?${params}`, { headers: authHeader })
       .then((r) => r.json())
       .then((body) => {
         setIssues(Array.isArray(body?.issues) ? body.issues : []);
-        setTotal(Number(body?.total ?? 0));
       })
       .catch(() => {})
       .finally(() => setLoading(false));
-  }, [isAdmin, page, filterCategory, filterSeverity, filterStatus]);
+  }, [isAdmin]);
 
   useEffect(() => { fetchSummary(); }, [fetchSummary]);
   useEffect(() => { fetchIssues(); }, [fetchIssues]);
@@ -102,15 +90,17 @@ export function DataQualityTab({ viewerSession }: DataQualityTabProps) {
   const handleRunChecks = async () => {
     if (!isAdmin || isRunningChecks) return;
     setIsRunningChecks(true);
+    setRunMessage(null);
     try {
-      await fetch('http://localhost:3001/admin/data-quality/run', { method: 'POST', headers: authHeader });
+      const response = await fetch('http://localhost:3001/admin/data-quality/run', { method: 'POST', headers: authHeader });
+      const payload = await response.json().catch(() => ({}));
+      const detected = Number(payload?.data?.detected ?? 0);
+      setRunMessage(detected > 0 ? `${detected} issue(s) detected or updated.` : 'No data quality issues detected.');
       fetchSummary();
       fetchIssues();
     } catch { /* non-fatal */ }
     finally { setIsRunningChecks(false); }
   };
-
-  const totalPages = Math.max(1, Math.ceil(total / LIMIT));
 
   if (!isAdmin) return null;
 
@@ -156,97 +146,42 @@ export function DataQualityTab({ viewerSession }: DataQualityTabProps) {
         )}
       </section>
 
+      {runMessage ? <p className={styles.infoText}>{runMessage}</p> : null}
+
       {/* Issue table */}
       <section className={styles.card}>
-        {/* Filters */}
-        <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
-          <select
-            aria-label="Filter by category"
-            title="Filter by category"
-            value={filterCategory}
-            onChange={(e) => { setFilterCategory(e.target.value); setPage(1); }}
-            className={styles.filterSelect}
-          >
-            {CATEGORIES.map((c) => <option key={c} value={c}>{c || 'All Categories'}</option>)}
-          </select>
-          <select
-            aria-label="Filter by severity"
-            title="Filter by severity"
-            value={filterSeverity}
-            onChange={(e) => { setFilterSeverity(e.target.value); setPage(1); }}
-            className={styles.filterSelect}
-          >
-            {SEVERITIES.map((s) => <option key={s} value={s}>{s || 'All Severities'}</option>)}
-          </select>
-          <select
-            aria-label="Filter by status"
-            title="Filter by status"
-            value={filterStatus}
-            onChange={(e) => { setFilterStatus(e.target.value); setPage(1); }}
-            className={styles.filterSelect}
-          >
-            {STATUSES.map((s) => <option key={s} value={s}>{s || 'All Statuses'}</option>)}
-          </select>
-        </div>
-
         {loading ? (
           <p className={styles.emptyState}>Loading…</p>
         ) : issues.length === 0 ? (
-          <p className={styles.emptyState}>No issues found for the selected filters.</p>
+          <p className={styles.emptyState}>No data quality issues detected.</p>
         ) : (
-          <>
-            <div style={{ overflowX: 'auto' }}>
-              <table className={styles.dataTable}>
-                <thead>
-                  <tr>
-                    <th>Issue Type</th>
-                    <th>Employee</th>
-                    <th>Staff ID</th>
-                    <th>Detected Problem</th>
-                    <th>Suggested Fix</th>
+          <div style={{ overflowX: 'auto' }}>
+            <table className={styles.dataTable}>
+              <thead>
+                <tr>
+                  <th>Employee</th>
+                  <th>Staff ID</th>
+                  <th>Issue</th>
+                  <th>Suggested Fix</th>
+                </tr>
+              </thead>
+              <tbody>
+                {issues.map((issue) => (
+                  <tr key={issue.id}>
+                    <td>{issue.employeeName || '—'}</td>
+                    <td>{issue.staffId || '—'}</td>
+                    <td style={{ maxWidth: 360 }}>
+                      <span className={`${styles.classificationChip} ${styles[SEVERITY_STYLES[issue.severity] ?? 'chipNeutral']}`}>
+                        {formatLabel(issue.issueType)}
+                      </span>
+                      <div style={{ marginTop: 6 }}>{issue.description}</div>
+                    </td>
+                    <td style={{ maxWidth: 320 }}>{getSuggestedFix(issue)}</td>
                   </tr>
-                </thead>
-                <tbody>
-                  {issues.map((issue) => (
-                    <tr key={issue.id}>
-                      <td>
-                        <span className={`${styles.classificationChip} ${styles[SEVERITY_STYLES[issue.severity] ?? 'chipNeutral']}`}>
-                          {formatLabel(issue.issueType)}
-                        </span>
-                      </td>
-                      <td>{issue.employeeName || '—'}</td>
-                      <td>{issue.staffId || '—'}</td>
-                      <td style={{ maxWidth: 320 }}>{issue.description}</td>
-                      <td style={{ maxWidth: 320 }}>{getSuggestedFix(issue)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-
-            {/* Pagination */}
-            {totalPages > 1 && (
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 12 }}>
-                <button
-                  type="button"
-                  className={styles.actionButtonSmall}
-                  onClick={() => setPage((p) => Math.max(1, p - 1))}
-                  disabled={page === 1}
-                >
-                  ← Prev
-                </button>
-                <span className={styles.statusText}>Page {page} / {totalPages} ({total} total)</span>
-                <button
-                  type="button"
-                  className={styles.actionButtonSmall}
-                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                  disabled={page === totalPages}
-                >
-                  Next →
-                </button>
-              </div>
-            )}
-          </>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </section>
     </div>

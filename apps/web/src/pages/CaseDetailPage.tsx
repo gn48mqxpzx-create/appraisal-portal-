@@ -319,14 +319,6 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
     }
   }, [workflow?.submittedRecommendation]);
 
-  useEffect(() => {
-    if (!benchmark) return;
-    const midpoint = benchmark.marketMidpoint !== null ? Number(benchmark.marketMidpoint) : null;
-    if (midpoint !== null && Number.isFinite(midpoint) && !workflow?.submittedRecommendation) {
-      setCustomInputValue(String(midpoint));
-    }
-  }, [benchmark, workflow?.submittedRecommendation]);
-
   const calculateTenure = (startDate: string | undefined): string => {
     if (!startDate) return '—';
     try {
@@ -471,6 +463,19 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
     [marketMinValue, marketMidpointValue, marketMaxValue, liveCustomTargetSalary, currentSalary]
   );
 
+  const customHasValidInput = useMemo(() => {
+    if (selectedRecommendation !== 'custom') {
+      return false;
+    }
+
+    const calc = recommendations.custom;
+    if (calc.targetSalary === null || calc.increaseAmount === null || calc.increasePercent === null) {
+      return false;
+    }
+
+    return calc.targetSalary >= 0 && calc.increaseAmount >= 0;
+  }, [recommendations.custom, selectedRecommendation]);
+
   const formatPercent = (value: number | null | undefined): string => {
     if (value === null || value === undefined || Number.isNaN(value)) return '—';
     return `${value >= 0 ? '+' : ''}${value.toFixed(1)}%`;
@@ -516,7 +521,12 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
     if (selectedRecommendation !== 'custom') {
       setCustomConfirmed(false);
       setConfirmedCustomCalc(null);
+      return;
     }
+
+    setCustomInputValue('');
+    setCustomConfirmed(false);
+    setConfirmedCustomCalc(null);
   }, [selectedRecommendation]);
 
   useEffect(() => {
@@ -531,7 +541,7 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
 
   const handleConfirmCustom = async () => {
     const calculation = recommendations.custom;
-    if (calculation.targetSalary === null || calculation.increaseAmount === null || calculation.increasePercent === null) return;
+    if (!customHasValidInput || calculation.targetSalary === null || calculation.increaseAmount === null || calculation.increasePercent === null) return;
 
     setConfirmedCustomCalc(calculation as { targetSalary: number; increaseAmount: number; increasePercent: number; });
     setCustomConfirmed(true);
@@ -740,7 +750,7 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
                 <label className={styles.fieldLabel}>Success Manager</label>
                 <div className={styles.fieldValue}>{successManager}</div>
               </div>
-              <div className={styles.profileField}>
+              <div className={`${styles.profileField} ${styles.profileFieldFull}`}>
                 <label className={styles.fieldLabel}>Reporting Manager</label>
                 <div className={styles.fieldValue}>{reportingManager}</div>
               </div>
@@ -814,7 +824,6 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
                       </span>
                     </div>
                     <div className={styles.classificationCategory}>
-                      <span className={styles.classificationCategoryLabel}>Category</span>
                       <span className={styles.classificationCategoryValue}>{formatAppraisalCategory(classification.appraisalCategory)}</span>
                     </div>
                   </div>
@@ -950,19 +959,19 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
                         <input
                           id="custom-value-input"
                           type="number"
-                          min="0"
+                          min={customInputMode === 'targetSalary' ? String(Math.max(0, currentSalary ?? 0)) : '0'}
                           step={customInputMode === 'increasePercent' ? '0.01' : '1'}
                           className={styles.customTargetInput}
                           value={customInputValue}
                           onChange={(event) => setCustomInputValue(event.target.value)}
                         />
-                        {!customConfirmed && recommendations.custom.targetSalary !== null ? (
+                        {!customConfirmed && customHasValidInput ? (
                           <p style={{ fontSize: 12, color: '#6b7280', marginTop: 8 }}>
                             Preview → Target: {formatCurrency(recommendations.custom.targetSalary, benchmark.currency)} · Increase: {formatCurrency(recommendations.custom.increaseAmount, benchmark.currency)} · {formatPercent(recommendations.custom.increasePercent)}
                           </p>
                         ) : null}
                         {!customConfirmed ? (
-                          <button type="button" disabled={recommendations.custom.targetSalary === null} onClick={() => void handleConfirmCustom()} className={styles.inlineActionButton}>
+                          <button type="button" disabled={!customHasValidInput} onClick={() => void handleConfirmCustom()} className={styles.inlineActionButton}>
                             Confirm Custom Recommendation
                           </button>
                         ) : (

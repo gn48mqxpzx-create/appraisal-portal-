@@ -1,6 +1,7 @@
 import { PrismaClient, Prisma } from "@prisma/client";
 import { hubspotFetch, fetchHubSpotOwners, resolveOwnerIdByName, HubSpotOwner } from "./hubspotClient";
 import { refreshWorkingDataForEmployees } from "./employeeWorkingDataService";
+import { exportLearnedRecords, reapplyLearnedRecordsAfterRebuild } from "./learnedDataPersistenceService";
 
 const prisma = new PrismaClient();
 
@@ -23,7 +24,101 @@ export interface SyncResult {
 
 /** Returns the most recent SyncRecord, or null if none exists */
 export async function getLastSyncRecord() {
+  const latestRun = await prisma.directorySyncRun.findFirst({ orderBy: { startedAt: "desc" } });
+  if (latestRun) {
+    return {
+      id: latestRun.id,
+      startedAt: latestRun.startedAt,
+      completedAt: latestRun.completedAt,
+      syncMode: latestRun.mode,
+      triggeredBy: latestRun.triggeredBy,
+      status: latestRun.status,
+      syncedCount: latestRun.syncedCount,
+      skippedCount: latestRun.skippedCount,
+      errorCount: latestRun.errorCount,
+      conflictCount: latestRun.conflictsCount,
+      durationMs: latestRun.durationMs
+    };
+  }
+
   return prisma.syncRecord.findFirst({ orderBy: { startedAt: "desc" } });
+}
+
+/** Returns recent SyncRecord history, newest first */
+export async function getSyncHistory(limit = 25) {
+  const safeLimit = Math.max(1, Math.min(100, Number.isFinite(limit) ? Math.trunc(limit) : 25));
+
+  const runRows = await prisma.directorySyncRun.findMany({
+    orderBy: { startedAt: "desc" },
+    take: safeLimit,
+    include: {
+      issues: {
+        orderBy: { createdAt: "asc" }
+      }
+    }
+  });
+
+  if (runRows.length > 0) {
+    return runRows.map((row) => ({
+      id: row.id,
+      startedAt: row.startedAt,
+      completedAt: row.completedAt,
+      syncMode: row.mode,
+      status: row.status,
+      syncedCount: row.syncedCount,
+      updatedCount: row.updatedCount,
+      createdCount: row.createdCount,
+      skippedCount: row.skippedCount,
+      conflictCount: row.conflictsCount,
+      mergedDuplicatesCount: row.mergedDuplicatesCount,
+      errorCount: row.errorCount,
+      summaryMessage: row.summaryMessage,
+      issues: row.issues.map((issue) => ({
+        id: issue.id,
+        issueType: issue.issueType,
+        referenceValue: issue.referenceValue,
+        message: issue.message,
+        severity: issue.severity,
+        createdAt: issue.createdAt
+      }))
+    }));
+  }
+
+  const legacyRows = await prisma.syncRecord.findMany({
+    orderBy: { startedAt: "desc" },
+    take: safeLimit
+  });
+
+  return legacyRows.map((row) => {
+    let updatedCount: number | null = null;
+    let createdCount: number | null = null;
+    let mergedDuplicatesCount: number | null = null;
+
+    if (row.errorMessage?.startsWith("SYNC_SUMMARY:")) {
+      try {
+        const parsed = JSON.parse(row.errorMessage.slice("SYNC_SUMMARY:".length)) as {
+          updated?: number;
+          created?: number;
+          mergedDuplicates?: number;
+        };
+        updatedCount = Number.isFinite(parsed.updated) ? Number(parsed.updated) : null;
+        createdCount = Number.isFinite(parsed.created) ? Number(parsed.created) : null;
+        mergedDuplicatesCount = Number.isFinite(parsed.mergedDuplicates) ? Number(parsed.mergedDuplicates) : null;
+      } catch {
+        // non-fatal parse fallback
+      }
+    }
+
+    return {
+      ...row,
+      updatedCount,
+      createdCount,
+        mergedDuplicatesCount,
+        status: row.status,
+        summaryMessage: null,
+        issues: []
+    };
+  });
 }
 
 /**
@@ -416,6 +511,14 @@ export async function syncEmployeeDirectory(options?: {
   const syncRecord = await prisma.syncRecord.create({
     data: { startedAt: new Date(), syncMode, triggeredBy, status: "RUNNING" }
   });
+  const syncRun = await prisma.directorySyncRun.create({
+    data: {
+      startedAt: new Date(),
+      mode: syncMode,
+      triggeredBy,
+      status: "RUNNING"
+    }
+  });
 
   let syncedCount = 0;
   let updatedCount = 0;
@@ -425,6 +528,12 @@ export async function syncEmployeeDirectory(options?: {
   let conflictCount = 0;
   const errors: string[] = [];
   const syncedHubspotIds = new Set<string>();
+  const runIssues: Array<{
+    issueType: string;
+    referenceValue: string | null;
+    message: string;
+    severity: "HIGH" | "MEDIUM" | "LOW";
+  }> = [];
 
   try {
     console.log(`[syncEmployeeDirectory] Starting ${syncMode} sync (triggeredBy: ${triggeredBy})`);
@@ -527,6 +636,12 @@ export async function syncEmployeeDirectory(options?: {
 
           mergedDuplicatesCount++;
           console.warn(`[syncEmployeeDirectory] ${mergeDescription}`);
+          runIssues.push({
+            issueType: "MERGED_DUPLICATE_DIRECTORY_RECORD",
+            referenceValue: hubspotId,
+            message: mergeDescription,
+            severity: "MEDIUM"
+          });
           await upsertDataQualityIssue(
             existingByStaffId.staffId,
             existingByStaffId.fullName,
@@ -559,6 +674,12 @@ export async function syncEmployeeDirectory(options?: {
               email,
               conflictingStaffId: existingByEmail.staffId,
               suggestedFix: "Verify employee identifiers in HubSpot and confirm the correct staff ID."
+            });
+            runIssues.push({
+              issueType: "DUPLICATE_EMAIL",
+              referenceValue: email,
+              message: desc,
+              severity: "HIGH"
             });
             conflictCount++;
             // Don't skip — we still update/create by canonical matching
@@ -611,6 +732,12 @@ export async function syncEmployeeDirectory(options?: {
         const msg = err instanceof Error ? err.message : "Unknown error";
         console.error(`[syncEmployeeDirectory] Error at contact ${contactId}: ${msg}`);
         errors.push(`Contact ${contactId}: sync processing failed`);
+        runIssues.push({
+          issueType: "CONTACT_SYNC_ERROR",
+          referenceValue: contactId,
+          message: msg,
+          severity: "MEDIUM"
+        });
         skippedCount++;
       }
     }
@@ -643,6 +770,7 @@ export async function syncEmployeeDirectory(options?: {
     }
 
     const durationMs = Date.now() - startTime;
+    const summaryMessage = `Synced=${syncedCount}, Updated=${updatedCount}, Created=${createdCount}, Skipped=${skippedCount}, MergedDuplicates=${mergedDuplicatesCount}, Conflicts=${conflictCount}, Errors=${errors.length}`;
     await prisma.syncRecord.update({
       where: { id: syncRecord.id },
       data: {
@@ -652,7 +780,36 @@ export async function syncEmployeeDirectory(options?: {
         skippedCount,
         errorCount: errors.length,
         conflictCount,
-        durationMs
+        durationMs,
+        errorMessage: `SYNC_SUMMARY:${JSON.stringify({
+          updated: updatedCount,
+          created: createdCount,
+          mergedDuplicates: mergedDuplicatesCount
+        })}`
+      }
+    });
+    await prisma.directorySyncRun.update({
+      where: { id: syncRun.id },
+      data: {
+        completedAt: new Date(),
+        status: "SUCCESS",
+        syncedCount,
+        updatedCount,
+        createdCount,
+        skippedCount,
+        mergedDuplicatesCount,
+        conflictsCount: conflictCount,
+        errorCount: errors.length,
+        durationMs,
+        summaryMessage,
+        issues: {
+          create: runIssues.map((issue) => ({
+            issueType: issue.issueType,
+            referenceValue: issue.referenceValue,
+            message: issue.message,
+            severity: issue.severity
+          }))
+        }
       }
     });
 
@@ -679,6 +836,13 @@ export async function syncEmployeeDirectory(options?: {
       console.log(`[syncEmployeeDirectory] Working Data refresh queued for ${allActiveStaffIds.length} employees`);
     } catch (err) {
       console.warn(`[syncEmployeeDirectory] Could not queue Working Data refresh: ${err instanceof Error ? err.message : err}`);
+    }
+
+    try {
+      await reapplyLearnedRecordsAfterRebuild();
+      await exportLearnedRecords();
+    } catch (err) {
+      console.warn(`[syncEmployeeDirectory] Learned data reapply/export failed: ${err instanceof Error ? err.message : err}`);
     }
 
     const finalResult: SyncResult = {
@@ -710,6 +874,26 @@ export async function syncEmployeeDirectory(options?: {
         status: "FAILED",
         errorMessage: errorMsg,
         durationMs
+      }
+    }).catch(() => {});
+    await prisma.directorySyncRun.update({
+      where: { id: syncRun.id },
+      data: {
+        completedAt: new Date(),
+        status: "FAILED",
+        errorCount: 1,
+        durationMs,
+        summaryMessage: errorMsg,
+        issues: {
+          create: [
+            {
+              issueType: "SYNC_FATAL_ERROR",
+              referenceValue: null,
+              message: errorMsg,
+              severity: "HIGH"
+            }
+          ]
+        }
       }
     }).catch(() => {});
 

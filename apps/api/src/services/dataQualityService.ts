@@ -10,6 +10,7 @@
  * - From the Admin Console
  */
 import { PrismaClient, Prisma } from "@prisma/client";
+import { resolveManagerNamesForCases } from "./employeeDirectoryService";
 
 const prisma = new PrismaClient();
 
@@ -131,6 +132,22 @@ export async function runDataQualityChecks(staffIds?: string[]): Promise<number>
   });
 
   const allStaffIds = employees.map((e) => e.staffId);
+  const workingDataRows = allStaffIds.length
+    ? await prisma.employeeWorkingData.findMany({
+        where: { staffId: { in: allStaffIds } },
+        select: {
+          staffId: true,
+          normalizedRole: true,
+          normalizedRoleStatus: true,
+          marketMatrixStatus: true,
+          successManagerName: true,
+          reportingManagerName: true,
+          currentCompensation: true,
+          tenureMonths: true
+        }
+      })
+    : [];
+  const workingDataByStaffId = new Map(workingDataRows.map((row) => [row.staffId, row]));
 
   // ── 1. Identity checks ────────────────────────────────────────────────────
   // Duplicate emails
@@ -216,8 +233,10 @@ export async function runDataQualityChecks(staffIds?: string[]): Promise<number>
       await autoResolveIssue(emp.staffId, "HIERARCHY_UNRESOLVED");
     }
 
-    // Missing SM
-    if (!emp.smName?.trim()) {
+    const wd = workingDataByStaffId.get(emp.staffId);
+
+    // Missing SM (canonical from Working Data first)
+    if (!wd?.successManagerName?.trim() && !emp.smName?.trim()) {
       await upsertIssue(emp.staffId, emp.fullName, "MISSING_SM", "HIERARCHY", "MEDIUM",
         `Employee ${emp.fullName} has no Success Manager assigned`,
         { suggestedFix: "Update Success Manager in HubSpot and run Directory Sync." }
@@ -227,8 +246,8 @@ export async function runDataQualityChecks(staffIds?: string[]): Promise<number>
       await autoResolveIssue(emp.staffId, "MISSING_SM");
     }
 
-    // Missing RM
-    if (!emp.rmName?.trim()) {
+    // Missing RM (canonical from Working Data first)
+    if (!wd?.reportingManagerName?.trim() && !emp.rmName?.trim()) {
       await upsertIssue(emp.staffId, emp.fullName, "MISSING_RM", "HIERARCHY", "LOW",
         `Employee ${emp.fullName} has no Relationship Manager assigned`,
         { suggestedFix: "Update Relationship Manager in HubSpot and run Directory Sync." }
@@ -257,6 +276,7 @@ export async function runDataQualityChecks(staffIds?: string[]): Promise<number>
 
   for (const emp of employees) {
     const roleKey = (emp.staffRole ?? "").toLowerCase();
+    const wd = workingDataByStaffId.get(emp.staffId);
     if (!roleKey) {
       await upsertIssue(emp.staffId, emp.fullName, "MISSING_ROLE", "ROLE", "MEDIUM",
         `Employee ${emp.fullName} has no staff role`, {}
@@ -266,7 +286,7 @@ export async function runDataQualityChecks(staffIds?: string[]): Promise<number>
     }
     if (!mappedRoles.has(roleKey)) {
       await upsertIssue(emp.staffId, emp.fullName, "ROLE_UNMAPPED", "ROLE", "MEDIUM",
-        `Role "${emp.staffRole}" has no market matrix mapping`,
+        `Role "${emp.staffRole}" has no approved role mapping`,
         {
           staffRole: emp.staffRole,
           suggestedFix: "Map this role in Role Library and save market matrix rows for all tenure bands."
@@ -275,6 +295,44 @@ export async function runDataQualityChecks(staffIds?: string[]): Promise<number>
       detected++;
     } else {
       await autoResolveIssue(emp.staffId, "ROLE_UNMAPPED");
+
+      if (!wd?.normalizedRole?.trim()) {
+        await upsertIssue(
+          emp.staffId,
+          emp.fullName,
+          "APPROVED_ROLE_MISSING_NORMALIZED_ROLE",
+          "ROLE",
+          "HIGH",
+          `Approved role mapping exists for "${emp.staffRole}" but Working Data normalized role is missing`,
+          {
+            staffRole: emp.staffRole,
+            suggestedFix: "Rebuild Working Data to reapply approved Role Library mappings."
+          }
+        );
+        detected++;
+      } else {
+        await autoResolveIssue(emp.staffId, "APPROVED_ROLE_MISSING_NORMALIZED_ROLE");
+      }
+
+      const normalizedRoleName = wd?.normalizedRole ?? null;
+      if ((wd?.normalizedRoleStatus ?? "").toUpperCase() === "MAPPED" && (wd?.marketMatrixStatus ?? "").toUpperCase() === "MISSING_MATRIX") {
+        await upsertIssue(
+          emp.staffId,
+          emp.fullName,
+          "ROLE_MAPPED_MISSING_MARKET_MATRIX",
+          "ROLE",
+          "HIGH",
+          `Role "${normalizedRoleName ?? "Unknown"}" is mapped but has no Market Matrix row for current tenure band`,
+          {
+            normalizedRole: normalizedRoleName,
+            suggestedFix: "Add or update Market Matrix rows for this normalized role."
+          }
+        );
+        detected++;
+      } else {
+        await autoResolveIssue(emp.staffId, "ROLE_MAPPED_MISSING_MARKET_MATRIX");
+      }
+
       if (weakRoles.has(roleKey)) {
         await upsertIssue(emp.staffId, emp.fullName, "ROLE_WEAK_MATCH", "ROLE", "LOW",
           `Role "${emp.staffRole}" matched with low confidence`, { staffRole: emp.staffRole }
@@ -295,6 +353,7 @@ export async function runDataQualityChecks(staffIds?: string[]): Promise<number>
 
   for (const emp of employees) {
     const comp = compByStaffId.get(emp.staffId);
+    const wd = workingDataByStaffId.get(emp.staffId);
     if (!comp) {
       await upsertIssue(emp.staffId, emp.fullName, "MISSING_COMPENSATION", "COMPENSATION", "MEDIUM",
         `No current compensation record for ${emp.fullName}`,
@@ -312,6 +371,25 @@ export async function runDataQualityChecks(staffIds?: string[]): Promise<number>
       } else {
         await autoResolveIssue(emp.staffId, "INVALID_COMPENSATION");
       }
+    }
+
+    if ((wd?.marketMatrixStatus ?? "").toUpperCase() !== "READY") {
+      await upsertIssue(
+        emp.staffId,
+        emp.fullName,
+        "BROKEN_BENCHMARK_READINESS",
+        "APPRAISAL",
+        "MEDIUM",
+        `Benchmark is not ready in Working Data (${wd?.marketMatrixStatus ?? "NO_WORKING_DATA"})`,
+        {
+          marketMatrixStatus: wd?.marketMatrixStatus ?? null,
+          normalizedRoleStatus: wd?.normalizedRoleStatus ?? null,
+          suggestedFix: "Ensure role mapping, market matrix, and compensation are complete, then rebuild Working Data."
+        }
+      );
+      detected++;
+    } else {
+      await autoResolveIssue(emp.staffId, "BROKEN_BENCHMARK_READINESS");
     }
   }
 
@@ -349,6 +427,49 @@ export async function runDataQualityChecks(staffIds?: string[]): Promise<number>
       } else {
         await autoResolveIssue(emp.staffId, "WSLL_INVALID_RANGE");
       }
+    }
+  }
+
+  // ── 7. Manager mismatch checks (Working Data vs resolved display) ─────────
+  const managerResolution = await resolveManagerNamesForCases(
+    employees.map((emp) => ({
+      staffId: emp.staffId,
+      directSmValue: emp.smName,
+      directRmValue: emp.rmName
+    }))
+  );
+
+  for (const emp of employees) {
+    const wd = workingDataByStaffId.get(emp.staffId);
+    const resolved = managerResolution.get(emp.staffId);
+
+    const wdSm = (wd?.successManagerName ?? "").trim().toLowerCase();
+    const wdRm = (wd?.reportingManagerName ?? "").trim().toLowerCase();
+    const resolvedSm = (resolved?.smName ?? "").trim().toLowerCase();
+    const resolvedRm = (resolved?.rmName ?? "").trim().toLowerCase();
+
+    const smMismatch = Boolean(wdSm && resolvedSm && wdSm !== resolvedSm);
+    const rmMismatch = Boolean(wdRm && resolvedRm && wdRm !== resolvedRm);
+
+    if (smMismatch || rmMismatch) {
+      await upsertIssue(
+        emp.staffId,
+        emp.fullName,
+        "MANAGER_MISMATCH_WORKING_DATA",
+        "HIERARCHY",
+        "HIGH",
+        "Manager values differ between canonical Working Data and resolved display values",
+        {
+          workingDataSuccessManager: wd?.successManagerName ?? null,
+          workingDataReportingManager: wd?.reportingManagerName ?? null,
+          resolvedSuccessManager: resolved?.smName ?? null,
+          resolvedReportingManager: resolved?.rmName ?? null,
+          suggestedFix: "Rebuild Working Data and ensure case/profile views use canonical manager values."
+        }
+      );
+      detected++;
+    } else {
+      await autoResolveIssue(emp.staffId, "MANAGER_MISMATCH_WORKING_DATA");
     }
   }
 

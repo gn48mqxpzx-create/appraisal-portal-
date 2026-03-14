@@ -10,6 +10,7 @@ import {
   upsertAdminHierarchyOverride,
   validateCanonicalHierarchyMappings
 } from "./services/canonicalHierarchyService";
+import { exportLearnedRecords } from "./services/learnedDataPersistenceService";
 
 const router = Router();
 
@@ -235,6 +236,10 @@ router.post("/hierarchy/override", async (req: Request, res: Response) => {
       scopedStaffIds: Array.isArray(body.scopedStaffIds) ? body.scopedStaffIds.map(String) : [],
       unresolvedHierarchyReason: body.unresolvedHierarchyReason ?? null,
       diagnostics: body.diagnostics ?? null
+    });
+
+    await exportLearnedRecords().catch(() => {
+      // non-fatal: hierarchy override is already persisted in DB
     });
 
     return res.status(200).json({

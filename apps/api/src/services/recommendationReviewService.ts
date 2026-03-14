@@ -6,10 +6,9 @@ import { getLatestWsllEligibilityByStaffId } from "./wsllEligibilityService";
 import { resolveManagerNamesForCases } from "./employeeDirectoryService";
 import {
   getAppraisalClassificationForCase,
-  getAppraisalClassificationForCases,
   type AppraisalClassification
 } from "./appraisalClassificationService";
-import { getOrBuildWorkingData, workingDataToClassification } from "./employeeWorkingDataService";
+import { getOrBuildWorkingData, getWorkingDataBatch, workingDataToClassification } from "./employeeWorkingDataService";
 
 const prisma = new PrismaClient();
 
@@ -107,6 +106,11 @@ const isReviewDecision = (value: unknown): value is ReviewDecision => {
 };
 
 const readCurrentSalaryForStaff = async (staffId: string): Promise<number | null> => {
+  const workingData = await getOrBuildWorkingData(staffId);
+  if (workingData?.currentCompensation !== null && workingData?.currentCompensation !== undefined) {
+    return workingData.currentCompensation;
+  }
+
   const employee = await prisma.employeeDirectory.findUnique({
     where: { staffId },
     include: { currentCompensation: true }
@@ -548,45 +552,36 @@ export async function getReviewQueue(viewer: { name: string; role: string; email
   });
 
   const staffIds = cases.map((caseItem) => caseItem.staffId);
-  const compensationRows = staffIds.length
-    ? await prisma.currentCompensation.findMany({
-        where: {
-          staffId: { in: staffIds }
-        }
-      })
-    : [];
-
-  const compensationByStaffId = new Map(
-    compensationRows.map((row) => [row.staffId, Number(row.currentCompensation)])
-  );
-
-  const classificationByCaseId = await getAppraisalClassificationForCases(cases.map((caseItem) => caseItem.id));
+  const workingDataByStaffId = await getWorkingDataBatch(staffIds);
 
   return cases
     .filter((caseItem) => caseItem.recommendation?.submittedAt)
-    .map((caseItem) => ({
-      caseId: caseItem.id,
-      staffId: caseItem.staffId,
-      employeeName: caseItem.fullName,
-      client: caseItem.companyName,
-      role: caseItem.staffRole,
-      currentSalary: compensationByStaffId.get(caseItem.staffId) ?? null,
-      proposedTargetSalary: caseItem.recommendation?.submittedTargetSalary !== null && caseItem.recommendation?.submittedTargetSalary !== undefined
-        ? Number(caseItem.recommendation.submittedTargetSalary)
-        : null,
-      increasePercent: caseItem.recommendation?.submittedIncreasePercent !== null && caseItem.recommendation?.submittedIncreasePercent !== undefined
-        ? Number(caseItem.recommendation.submittedIncreasePercent)
-        : null,
-      guardrailLevel: caseItem.recommendation?.submittedGuardrailLevel ?? null,
-      submittedBy: caseItem.recommendation?.submittedBy ?? null,
-      submittedDate: caseItem.recommendation?.submittedAt?.toISOString() ?? null,
-      appraisalCategory: classificationByCaseId.get(caseItem.id)?.appraisalCategory ?? null,
-      rmApprovalRequired: classificationByCaseId.get(caseItem.id)?.rmApprovalRequired ?? false,
-      wsllStatus: classificationByCaseId.get(caseItem.id)?.wsllStatus ?? null,
-      wsllReason: classificationByCaseId.get(caseItem.id)?.wsllReason ?? null,
-      tenureGroup: classificationByCaseId.get(caseItem.id)?.tenureGroup ?? null,
-      marketPosition: classificationByCaseId.get(caseItem.id)?.marketPosition ?? null
-    }));
+    .map((caseItem) => {
+      const wd = workingDataByStaffId.get(caseItem.staffId);
+      return {
+        caseId: caseItem.id,
+        staffId: caseItem.staffId,
+        employeeName: caseItem.fullName,
+        client: caseItem.companyName,
+        role: caseItem.staffRole,
+        currentSalary: wd?.currentCompensation ?? null,
+        proposedTargetSalary: caseItem.recommendation?.submittedTargetSalary !== null && caseItem.recommendation?.submittedTargetSalary !== undefined
+          ? Number(caseItem.recommendation.submittedTargetSalary)
+          : null,
+        increasePercent: caseItem.recommendation?.submittedIncreasePercent !== null && caseItem.recommendation?.submittedIncreasePercent !== undefined
+          ? Number(caseItem.recommendation.submittedIncreasePercent)
+          : null,
+        guardrailLevel: caseItem.recommendation?.submittedGuardrailLevel ?? null,
+        submittedBy: caseItem.recommendation?.submittedBy ?? null,
+        submittedDate: caseItem.recommendation?.submittedAt?.toISOString() ?? null,
+        appraisalCategory: wd ? workingDataToClassification(caseItem.id, wd).appraisalCategory : null,
+        rmApprovalRequired: wd?.rmApprovalRequired ?? false,
+        wsllStatus: wd?.wsllStatus ?? null,
+        wsllReason: wd?.wsllReason ?? null,
+        tenureGroup: wd?.tenureGroup ?? null,
+        marketPosition: wd?.marketPosition ?? null
+      };
+    });
 }
 
 export async function submitCaseToPayroll(caseId: string, submittedBy?: string | null) {

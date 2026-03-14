@@ -20,6 +20,21 @@ interface LiveSyncStatus {
   durationMs: number | null;
 }
 
+interface SyncHistoryItem {
+  id: string;
+  startedAt: string;
+  completedAt?: string | null;
+  syncMode: string;
+  status?: string;
+  syncedCount: number;
+  updatedCount?: number | null;
+  createdCount?: number | null;
+  skippedCount: number;
+  errorCount: number;
+  conflictCount: number;
+  summaryMessage?: string | null;
+}
+
 interface SessionSyncResult {
   lastResult: 'Success' | 'Failed';
   synced: number;
@@ -36,6 +51,8 @@ interface SessionSyncResult {
 export function DataOperationsTab({ viewerSession }: DataOperationsTabProps) {
   const [isSyncing, setIsSyncing] = useState(false);
   const [liveSyncStatus, setLiveSyncStatus] = useState<LiveSyncStatus | null>(null);
+  const [syncHistory, setSyncHistory] = useState<SyncHistoryItem[]>([]);
+  const [historyExpanded, setHistoryExpanded] = useState(false);
   const [sessionSyncResult, setSessionSyncResult] = useState<SessionSyncResult | null>(null);
 
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -59,6 +76,13 @@ export function DataOperationsTab({ viewerSession }: DataOperationsTabProps) {
     })
       .then((r) => r.json())
       .then((body) => { if (body?.data) setLiveSyncStatus(body.data); })
+      .catch(() => {});
+
+    fetch('http://localhost:3001/admin/sync-history?limit=25', {
+      headers: { Authorization: `Bearer ${localStorage.getItem('auth_token') || ''}` }
+    })
+      .then((r) => r.json())
+      .then((body) => { if (Array.isArray(body?.data)) setSyncHistory(body.data); })
       .catch(() => {});
   }, [isAdmin]);
 
@@ -108,6 +132,13 @@ export function DataOperationsTab({ viewerSession }: DataOperationsTabProps) {
       })
         .then((r) => r.json())
         .then((body) => { if (body?.data) setLiveSyncStatus(body.data); })
+        .catch(() => {});
+
+      fetch('http://localhost:3001/admin/sync-history?limit=25', {
+        headers: { Authorization: `Bearer ${localStorage.getItem('auth_token') || ''}` }
+      })
+        .then((r) => r.json())
+        .then((body) => { if (Array.isArray(body?.data)) setSyncHistory(body.data); })
         .catch(() => {});
     } catch (_error) {
       setSessionSyncResult({
@@ -211,6 +242,55 @@ export function DataOperationsTab({ viewerSession }: DataOperationsTabProps) {
             </div>
           ) : !liveSyncStatus ? (
             <p className={styles.emptyState}>No sync has been run yet.</p>
+          ) : null}
+        </div>
+
+        <div className={styles.statusPanel}>
+          <button
+            type="button"
+            className={styles.actionButtonSmall}
+            onClick={() => setHistoryExpanded((value) => !value)}
+          >
+            {historyExpanded ? 'Hide Sync History' : 'Show Sync History'}
+          </button>
+
+          {historyExpanded && syncHistory.length > 0 ? (
+            <div style={{ marginTop: 12, overflowX: 'auto' }}>
+              <table className={styles.dataTable}>
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Mode</th>
+                    <th>Status</th>
+                    <th>Synced</th>
+                    <th>Updated</th>
+                    <th>Created</th>
+                    <th>Skipped</th>
+                    <th>Conflicts</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {syncHistory.map((row) => {
+                    const updated = row.updatedCount ?? Math.max(0, Number(row.syncedCount || 0) - Number(row.errorCount || 0));
+                    const created = row.createdCount ?? null;
+                    return (
+                      <tr key={row.id}>
+                        <td>{new Date(row.completedAt || row.startedAt).toLocaleString()}</td>
+                        <td>{row.syncMode}</td>
+                        <td>{row.status || (row.errorCount > 0 ? 'FAILED' : 'SUCCESS')}</td>
+                        <td>{Number(row.syncedCount || 0)}</td>
+                        <td>{updated}</td>
+                        <td>{created ?? '—'}</td>
+                        <td>{Number(row.skippedCount || 0)}</td>
+                        <td>{Number(row.conflictCount || 0)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          ) : historyExpanded ? (
+            <p className={styles.emptyState} style={{ marginTop: 12 }}>No sync history available yet.</p>
           ) : null}
         </div>
       </section>

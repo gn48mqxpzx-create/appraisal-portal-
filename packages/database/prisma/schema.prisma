@@ -1321,6 +1321,49 @@ model SyncRecord {
   @@map("sync_records")
 }
 
+model DirectorySyncRun {
+  id                    String                 @id @default(uuid())
+  startedAt             DateTime               @default(now())
+  completedAt           DateTime?
+  mode                  String                 @default("FULL")
+  triggeredBy           String                 @default("admin")
+  status                String                 @default("RUNNING")
+  syncedCount           Int                    @default(0)
+  updatedCount          Int                    @default(0)
+  createdCount          Int                    @default(0)
+  skippedCount          Int                    @default(0)
+  mergedDuplicatesCount Int                    @default(0)
+  conflictsCount        Int                    @default(0)
+  errorCount            Int                    @default(0)
+  durationMs            Int?
+  summaryMessage        String?
+
+  issues                DirectorySyncRunIssue[]
+
+  @@index([startedAt])
+  @@index([status])
+  @@index([mode])
+  @@map("directory_sync_runs")
+}
+
+model DirectorySyncRunIssue {
+  id             String           @id @default(uuid())
+  syncRunId      String
+  issueType      String
+  referenceValue String?
+  message        String
+  severity       String           @default("MEDIUM")
+  createdAt      DateTime         @default(now())
+
+  syncRun        DirectorySyncRun @relation(fields: [syncRunId], references: [id], onDelete: Cascade)
+
+  @@index([syncRunId])
+  @@index([issueType])
+  @@index([severity])
+  @@index([createdAt])
+  @@map("directory_sync_run_issues")
+}
+
 // ============================================================================
 // DATA QUALITY ISSUES — anomaly flags from evaluation pipeline
 // ============================================================================

@@ -126,7 +126,7 @@ export async function getAppraisalClassificationForCases(caseIds: string[]): Pro
   }
 
   const staffIds = unique(cases.map((caseItem) => caseItem.staffId));
-  const [wsllMap, compensationRows] = await Promise.all([
+  const [wsllMap, compensationRows, workingDataRows] = await Promise.all([
     getLatestWsllEligibilityByStaffIds(staffIds),
     prisma.currentCompensation.findMany({
       where: {
@@ -138,96 +138,73 @@ export async function getAppraisalClassificationForCases(caseIds: string[]): Pro
         staffId: true,
         currentCompensation: true
       }
+    }),
+    prisma.employeeWorkingData.findMany({
+      where: {
+        staffId: {
+          in: staffIds
+        }
+      },
+      select: {
+        staffId: true,
+        latestWsllAverage: true,
+        wsllStatus: true,
+        wsllReason: true,
+        tenureMonths: true,
+        tenureGroup: true,
+        marketPosition: true,
+        marketMatrixMin: true,
+        marketMatrixMax: true,
+        currentCompensation: true,
+        rmApprovalRequired: true,
+        appraisalCategory: true
+      }
     })
   ]);
 
   const compensationByStaffId = new Map(
     compensationRows.map((row) => [row.staffId, Number(row.currentCompensation)])
   );
-
-  const roleQueries = buildRoleMappingQueries(cases.map((caseItem) => caseItem.staffRole));
-  const roleMappings = roleQueries.length
-    ? await prisma.roleAlignmentMapping.findMany({
-        where: {
-          OR: roleQueries
-        },
-        include: {
-          standardizedRole: true
-        }
-      })
-    : [];
-
-  const roleMappingByRawRole = new Map<string, (typeof roleMappings)[number]>();
-  for (const mapping of roleMappings) {
-    const key = normalizeLower(mapping.sourceRoleName);
-    if (!roleMappingByRawRole.has(key)) {
-      roleMappingByRawRole.set(key, mapping);
-    }
-  }
-
-  const matrixNeeds = cases.map((caseItem) => {
-    const roleKey = normalizeLower(caseItem.staffRole);
-    const mapping = roleMappingByRawRole.get(roleKey);
-    const tenureMonths = caseItem.tenureMonths ?? resolveTenureMonths(caseItem.startDate);
-    const tenureBand = resolveTenureBand(tenureMonths);
-
-    return {
-      caseId: caseItem.id,
-      roleKey,
-      mapping,
-      tenureBand,
-      standardizedRoleId: mapping?.standardizedRoleId ?? null,
-      standardizedRoleName: mapping?.standardizedRole?.roleName ?? mapping?.mappedRoleName ?? null
-    };
-  });
-
-  const matrixRoleIds = unique(matrixNeeds.map((item) => item.standardizedRoleId || "")).filter(Boolean);
-  const matrixRoleNames = unique(matrixNeeds.map((item) => item.standardizedRoleName || "")).filter(Boolean);
-  const matrixBands = unique(matrixNeeds.map((item) => item.tenureBand || "")).filter(Boolean) as TenureBandLabel[];
-
-  const matrixWhereOr = [
-    ...(matrixRoleIds.length > 0
-      ? [
-          {
-            standardizedRoleId: {
-              in: matrixRoleIds
-            }
-          }
-        ]
-      : []),
-    ...matrixRoleNames.map((roleName) => ({
-      roleName: {
-        equals: roleName,
-        mode: "insensitive" as const
-      }
-    }))
-  ];
-
-  const matrixRows = matrixBands.length > 0 && matrixWhereOr.length > 0
-    ? await prisma.marketValueMatrix.findMany({
-        where: {
-          tenureBand: {
-            in: matrixBands
-          },
-          OR: matrixWhereOr
-        }
-      })
-    : [];
-
-  const matrixByKey = new Map<string, (typeof matrixRows)[number]>();
-  for (const row of matrixRows) {
-    const keyByRoleId = row.standardizedRoleId ? `${row.tenureBand}|roleId:${row.standardizedRoleId}` : null;
-    if (keyByRoleId && !matrixByKey.has(keyByRoleId)) {
-      matrixByKey.set(keyByRoleId, row);
-    }
-
-    const keyByRoleName = `${row.tenureBand}|roleName:${normalizeLower(row.roleName)}`;
-    if (!matrixByKey.has(keyByRoleName)) {
-      matrixByKey.set(keyByRoleName, row);
-    }
-  }
+  const workingDataByStaffId = new Map(workingDataRows.map((row) => [row.staffId, row]));
 
   for (const caseItem of cases) {
+    const wd = workingDataByStaffId.get(caseItem.staffId);
+    if (wd) {
+      const wsllStatus = (wd.wsllStatus as WsllStatus | null) ?? "NO_WSLL";
+      const wsllReason = (wd.wsllReason as WsllReason | null) ?? "NO_DATA";
+      const tenureMonths = wd.tenureMonths ?? caseItem.tenureMonths ?? resolveTenureMonths(caseItem.startDate);
+      const tenureGroup = (wd.tenureGroup as TenureGroup | null) ?? toTenureGroup(tenureMonths);
+      const currentSalary = wd.currentCompensation !== null ? Number(wd.currentCompensation) : compensationByStaffId.get(caseItem.staffId) ?? null;
+      const benchmarkReference =
+        wd.marketMatrixMin !== null && wd.marketMatrixMax !== null
+          ? Number(((Number(wd.marketMatrixMin) + Number(wd.marketMatrixMax)) / 2).toFixed(2))
+          : null;
+      const marketPosition = (wd.marketPosition as MarketPosition | null)
+        ?? (benchmarkReference !== null && currentSalary !== null && currentSalary < benchmarkReference
+          ? "BELOW_MARKET"
+          : "AT_OR_ABOVE_MARKET");
+      const rmApprovalRequired = Boolean(wd.rmApprovalRequired);
+      const appraisalCategory =
+        (wd.appraisalCategory as AppraisalCategory | null)
+        ?? toCategory(wsllStatus, tenureGroup, marketPosition);
+
+      result.set(caseItem.id, {
+        caseId: caseItem.id,
+        staffId: caseItem.staffId,
+        wsllStatus,
+        wsllReason,
+        wsllAverage: wd.latestWsllAverage !== null ? Number(wd.latestWsllAverage) : null,
+        tenureMonths,
+        tenureGroup,
+        marketPosition,
+        benchmarkReference,
+        currentSalary,
+        rmApprovalRequired,
+        appraisalCategory
+      });
+      continue;
+    }
+
     const wsll = wsllMap.get(caseItem.staffId) ?? {
       status: "MISSING_WSLL" as const,
       averageWsll: null,
@@ -240,23 +217,7 @@ export async function getAppraisalClassificationForCases(caseIds: string[]): Pro
     const tenureMonths = caseItem.tenureMonths ?? resolveTenureMonths(caseItem.startDate);
     const tenureGroup = toTenureGroup(tenureMonths);
 
-    const roleKey = normalizeLower(caseItem.staffRole);
-    const mapping = roleMappingByRawRole.get(roleKey);
-    const tenureBand = resolveTenureBand(tenureMonths);
-
-    let matrixRow: (typeof matrixRows)[number] | undefined;
-    if (tenureBand && mapping?.standardizedRoleId) {
-      matrixRow = matrixByKey.get(`${tenureBand}|roleId:${mapping.standardizedRoleId}`);
-    }
-
-    if (!matrixRow && tenureBand) {
-      const mappedRoleName = mapping?.standardizedRole?.roleName ?? mapping?.mappedRoleName ?? null;
-      if (mappedRoleName) {
-        matrixRow = matrixByKey.get(`${tenureBand}|roleName:${normalizeLower(mappedRoleName)}`);
-      }
-    }
-
-    const benchmarkReference = matrixRow ? toMidpoint(matrixRow.minSalary, matrixRow.maxSalary) : null;
+    const benchmarkReference = null;
     const currentSalary = compensationByStaffId.get(caseItem.staffId) ?? null;
 
     const marketPosition: MarketPosition =

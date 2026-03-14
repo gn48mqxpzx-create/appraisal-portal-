@@ -1,0 +1,590 @@
+{
+  "version": 1,
+  "exportedAt": "2026-03-14T15:27:05.399Z",
+  "standardizedRoles": [
+    {
+      "roleName": "Accountant",
+      "isActive": true
+    },
+    {
+      "roleName": "Administrative Assistant",
+      "isActive": true
+    },
+    {
+      "roleName": "Banking Officer",
+      "isActive": true
+    },
+    {
+      "roleName": "Bookkeeper",
+      "isActive": true
+    },
+    {
+      "roleName": "Broker Support",
+      "isActive": true
+    },
+    {
+      "roleName": "Business Development Associate",
+      "isActive": true
+    },
+    {
+      "roleName": "Collections Officer",
+      "isActive": true
+    },
+    {
+      "roleName": "Credit Analyst",
+      "isActive": true
+    },
+    {
+      "roleName": "Customer Service Representative",
+      "isActive": true
+    },
+    {
+      "roleName": "Digital Marketing Specialist",
+      "isActive": true
+    },
+    {
+      "roleName": "Dispute Resolution Officer",
+      "isActive": true
+    },
+    {
+      "roleName": "Estimator",
+      "isActive": true
+    },
+    {
+      "roleName": "Executive Assistant",
+      "isActive": true
+    },
+    {
+      "roleName": "Financial Planner",
+      "isActive": true
+    },
+    {
+      "roleName": "Fp Intern",
+      "isActive": true
+    },
+    {
+      "roleName": "Fullfillment",
+      "isActive": true
+    },
+    {
+      "roleName": "General Administrator",
+      "isActive": true
+    },
+    {
+      "roleName": "General Virtual Assistant",
+      "isActive": true
+    },
+    {
+      "roleName": "Graphic Artist",
+      "isActive": true
+    },
+    {
+      "roleName": "Insurance Specialist",
+      "isActive": true
+    },
+    {
+      "roleName": "Investment Specialist",
+      "isActive": true
+    },
+    {
+      "roleName": "Loan Processor",
+      "isActive": true
+    },
+    {
+      "roleName": "Mortgage Broking",
+      "isActive": true
+    },
+    {
+      "roleName": "Onboarding Officer",
+      "isActive": true
+    },
+    {
+      "roleName": "Paralegal",
+      "isActive": true
+    },
+    {
+      "roleName": "Paraplanner",
+      "isActive": true
+    },
+    {
+      "roleName": "Parapplaner",
+      "isActive": true
+    },
+    {
+      "roleName": "Payroll",
+      "isActive": true
+    },
+    {
+      "roleName": "Sales",
+      "isActive": true
+    },
+    {
+      "roleName": "Senior Insurance Administrator",
+      "isActive": true
+    },
+    {
+      "roleName": "Settlements Officer",
+      "isActive": true
+    },
+    {
+      "roleName": "Software Engineer",
+      "isActive": true
+    },
+    {
+      "roleName": "Success Manager",
+      "isActive": true
+    },
+    {
+      "roleName": "Team Lead",
+      "isActive": true
+    },
+    {
+      "roleName": "Team Manager",
+      "isActive": true
+    },
+    {
+      "roleName": "Template Developer",
+      "isActive": true
+    },
+    {
+      "roleName": "Workforce Officer",
+      "isActive": true
+    },
+    {
+      "roleName": "Workforce Support",
+      "isActive": true
+    }
+  ],
+  "roleAlignmentMappings": [
+    {
+      "sourceRoleName": "APay Onboarding Officer",
+      "mappedRoleName": "Onboarding Officer",
+      "standardizedRoleName": "Onboarding Officer",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": 0.82
+    },
+    {
+      "sourceRoleName": "Adviser Support Specialist",
+      "mappedRoleName": "Broker Support",
+      "standardizedRoleName": "Broker Support",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": null
+    },
+    {
+      "sourceRoleName": "Analyst",
+      "mappedRoleName": "Credit Analyst",
+      "standardizedRoleName": "Credit Analyst",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": 0.82
+    },
+    {
+      "sourceRoleName": "Banking Officer",
+      "mappedRoleName": "Banking Officer",
+      "standardizedRoleName": "Banking Officer",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": 0
+    },
+    {
+      "sourceRoleName": "Business Development Associate",
+      "mappedRoleName": "Business Development Associate",
+      "standardizedRoleName": "Business Development Associate",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": 0
+    },
+    {
+      "sourceRoleName": "Buying Assistant",
+      "mappedRoleName": "Administrative Assistant",
+      "standardizedRoleName": "Administrative Assistant",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": null
+    },
+    {
+      "sourceRoleName": "Client Service Specialist",
+      "mappedRoleName": "Customer Service Representative",
+      "standardizedRoleName": "Customer Service Representative",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": null
+    },
+    {
+      "sourceRoleName": "Client Support Officer",
+      "mappedRoleName": "Broker Support",
+      "standardizedRoleName": "Broker Support",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": null
+    },
+    {
+      "sourceRoleName": "Coaching Support Specialist",
+      "mappedRoleName": "Broker Support",
+      "standardizedRoleName": "Broker Support",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": null
+    },
+    {
+      "sourceRoleName": "Collections Officer",
+      "mappedRoleName": "Collections Officer",
+      "standardizedRoleName": "Collections Officer",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": 0.3333
+    },
+    {
+      "sourceRoleName": "Corporate Administrator",
+      "mappedRoleName": "General Administrator",
+      "standardizedRoleName": "General Administrator",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": 0.3333
+    },
+    {
+      "sourceRoleName": "Customer Service & Accreditations",
+      "mappedRoleName": "Customer Service Representative",
+      "standardizedRoleName": "Customer Service Representative",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": null
+    },
+    {
+      "sourceRoleName": "Customer Service Manager",
+      "mappedRoleName": "Customer Service Representative",
+      "standardizedRoleName": "Customer Service Representative",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": null
+    },
+    {
+      "sourceRoleName": "Digital Marketing - VA",
+      "mappedRoleName": "Digital Marketing Specialist",
+      "standardizedRoleName": "Digital Marketing Specialist",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": null
+    },
+    {
+      "sourceRoleName": "Dispute Resolution Officer",
+      "mappedRoleName": "Dispute Resolution Officer",
+      "standardizedRoleName": "Dispute Resolution Officer",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": 0.25
+    },
+    {
+      "sourceRoleName": "Estimator VA",
+      "mappedRoleName": "Estimator",
+      "standardizedRoleName": "Estimator",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": 0
+    },
+    {
+      "sourceRoleName": "Executive/Personal Assistant",
+      "mappedRoleName": "Administrative Assistant",
+      "standardizedRoleName": "Administrative Assistant",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": null
+    },
+    {
+      "sourceRoleName": "FP Admin 1 - Customer/Client Service Officer",
+      "mappedRoleName": "Financial Planner",
+      "standardizedRoleName": "Financial Planner",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": null
+    },
+    {
+      "sourceRoleName": "FP Admin 2/ Client Service Manager",
+      "mappedRoleName": "Financial Planner",
+      "standardizedRoleName": "Financial Planner",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": null
+    },
+    {
+      "sourceRoleName": "FP Intern",
+      "mappedRoleName": "Fp Intern",
+      "standardizedRoleName": "Fp Intern",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": 0.25
+    },
+    {
+      "sourceRoleName": "Financial Planner",
+      "mappedRoleName": "Financial Planner",
+      "standardizedRoleName": "Financial Planner",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": 0
+    },
+    {
+      "sourceRoleName": "Financial Planning VA (FP VA)",
+      "mappedRoleName": "Financial Planner",
+      "standardizedRoleName": "Financial Planner",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": 0.25
+    },
+    {
+      "sourceRoleName": "General Administrator",
+      "mappedRoleName": "General Administrator",
+      "standardizedRoleName": "General Administrator",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": 0
+    },
+    {
+      "sourceRoleName": "General VA",
+      "mappedRoleName": "General Virtual Assistant",
+      "standardizedRoleName": "General Virtual Assistant",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": 0.3333
+    },
+    {
+      "sourceRoleName": "General Virtual Assistant",
+      "mappedRoleName": "General Virtual Assistant",
+      "standardizedRoleName": "General Virtual Assistant",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": null
+    },
+    {
+      "sourceRoleName": "General Virtual Assistant - CSO",
+      "mappedRoleName": "Administrative Assistant",
+      "standardizedRoleName": "Administrative Assistant",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": null
+    },
+    {
+      "sourceRoleName": "Graphic Artist",
+      "mappedRoleName": "Graphic Artist",
+      "standardizedRoleName": "Graphic Artist",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": 0
+    },
+    {
+      "sourceRoleName": "Insurance Specialist",
+      "mappedRoleName": "Insurance Specialist",
+      "standardizedRoleName": "Insurance Specialist",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": null
+    },
+    {
+      "sourceRoleName": "Investment Specialist",
+      "mappedRoleName": "Investment Specialist",
+      "standardizedRoleName": "Investment Specialist",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": null
+    },
+    {
+      "sourceRoleName": "Junior Parapplaner",
+      "mappedRoleName": "Parapplaner",
+      "standardizedRoleName": "Parapplaner",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": 0
+    },
+    {
+      "sourceRoleName": "MB - Broker Support",
+      "mappedRoleName": "Mortgage Broking",
+      "standardizedRoleName": "Mortgage Broking",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": 0.82
+    },
+    {
+      "sourceRoleName": "MB - Managed Services",
+      "mappedRoleName": "Mortgage Broking",
+      "standardizedRoleName": "Mortgage Broking",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": 0.2
+    },
+    {
+      "sourceRoleName": "MB - Repricing Specialist",
+      "mappedRoleName": "Mortgage Broking",
+      "standardizedRoleName": "Mortgage Broking",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": null
+    },
+    {
+      "sourceRoleName": "MB end-to-end / Senior Parabroker",
+      "mappedRoleName": "Mortgage Broking",
+      "standardizedRoleName": "Mortgage Broking",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": 0.9
+    },
+    {
+      "sourceRoleName": "MB-VA",
+      "mappedRoleName": "Mortgage Broking",
+      "standardizedRoleName": "Mortgage Broking",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": 0.25
+    },
+    {
+      "sourceRoleName": "Member Concierge",
+      "mappedRoleName": "General Administrator",
+      "standardizedRoleName": "General Administrator",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": 0
+    },
+    {
+      "sourceRoleName": "Member Fulfillment Manager",
+      "mappedRoleName": "Fullfillment",
+      "standardizedRoleName": "Fullfillment",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": 0.25
+    },
+    {
+      "sourceRoleName": "Member Fulfillment Officer",
+      "mappedRoleName": "Fullfillment",
+      "standardizedRoleName": "Fullfillment",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": 0.25
+    },
+    {
+      "sourceRoleName": "Mortgage Broking - VA",
+      "mappedRoleName": "Mortgage Broking",
+      "standardizedRoleName": "Mortgage Broking",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": 0.82
+    },
+    {
+      "sourceRoleName": "Mortgage Broking - VA;MB Admin 2 / Loan Processor",
+      "mappedRoleName": "Mortgage Broking",
+      "standardizedRoleName": "Mortgage Broking",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": 0.9
+    },
+    {
+      "sourceRoleName": "Onboarding Officer",
+      "mappedRoleName": "Onboarding Officer",
+      "standardizedRoleName": "Onboarding Officer",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": 0.3333
+    },
+    {
+      "sourceRoleName": "Onboarding Specialist",
+      "mappedRoleName": "Digital Marketing Specialist",
+      "standardizedRoleName": "Digital Marketing Specialist",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": null
+    },
+    {
+      "sourceRoleName": "Operations Team Lead",
+      "mappedRoleName": "Team Lead",
+      "standardizedRoleName": "Team Lead",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": 0.82
+    },
+    {
+      "sourceRoleName": "Paralegal",
+      "mappedRoleName": "Paralegal",
+      "standardizedRoleName": "Paralegal",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": 0
+    },
+    {
+      "sourceRoleName": "Payroll",
+      "mappedRoleName": "Payroll",
+      "standardizedRoleName": "Payroll",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": 0
+    },
+    {
+      "sourceRoleName": "Portfolio Administration Associate",
+      "mappedRoleName": "General Administrator",
+      "standardizedRoleName": "General Administrator",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": 0.2
+    },
+    {
+      "sourceRoleName": "Practice Manager - Team Lead",
+      "mappedRoleName": "Team Lead",
+      "standardizedRoleName": "Team Lead",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": 0.82
+    },
+    {
+      "sourceRoleName": "Sales - Direct",
+      "mappedRoleName": "Sales",
+      "standardizedRoleName": "Sales",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": 0
+    },
+    {
+      "sourceRoleName": "Senior Client Support Officer",
+      "mappedRoleName": "Broker Support",
+      "standardizedRoleName": "Broker Support",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": null
+    },
+    {
+      "sourceRoleName": "Senior Customer Service Manager",
+      "mappedRoleName": "Customer Service Representative",
+      "standardizedRoleName": "Customer Service Representative",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": null
+    },
+    {
+      "sourceRoleName": "Senior Insurance Administrator",
+      "mappedRoleName": "Insurance Specialist",
+      "standardizedRoleName": "Insurance Specialist",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": 0.3333
+    },
+    {
+      "sourceRoleName": "Settlements Officer",
+      "mappedRoleName": "Settlements Officer",
+      "standardizedRoleName": "Settlements Officer",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": 0.3333
+    },
+    {
+      "sourceRoleName": "Software Engineer",
+      "mappedRoleName": "Software Engineer",
+      "standardizedRoleName": "Software Engineer",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": 0
+    },
+    {
+      "sourceRoleName": "Success Manager",
+      "mappedRoleName": "Success Manager",
+      "standardizedRoleName": "Success Manager",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": 0.3333
+    },
+    {
+      "sourceRoleName": "Team Lead",
+      "mappedRoleName": "Team Lead",
+      "standardizedRoleName": "Team Lead",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": 0
+    },
+    {
+      "sourceRoleName": "Team Manager",
+      "mappedRoleName": "Team Manager",
+      "standardizedRoleName": "Team Manager",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": 0.3333
+    },
+    {
+      "sourceRoleName": "Template Developer",
+      "mappedRoleName": "Template Developer",
+      "standardizedRoleName": "Template Developer",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": 0
+    },
+    {
+      "sourceRoleName": "Workforce Officer",
+      "mappedRoleName": "Workforce Support",
+      "standardizedRoleName": "Workforce Support",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": 0.3333
+    },
+    {
+      "sourceRoleName": "Workforce Support Officer",
+      "mappedRoleName": "Workforce Support",
+      "standardizedRoleName": "Workforce Support",
+      "matchSource": "ADMIN_CONFIRMED",
+      "confidenceScore": null
+    }
+  ],
+  "hierarchyOverrides": [],
+  "conflictResolutions": [
+    {
+      "issueType": "DUPLICATE_EMAIL",
+      "staffId": "P2400092",
+      "employeeName": "Keith Lamaclamac",
+      "status": "AUTO_RESOLVED",
+      "description": "Email keith.l@vaplatinum.com.au exists on staffId P2400101 but incoming record has staffId P2400092",
+      "metadata": {
+        "email": "keith.l@vaplatinum.com.au",
+        "suggestedFix": "Verify employee identifiers in HubSpot and confirm the correct staff ID.",
+        "conflictingStaffId": "P2400101"
+      },
+      "resolvedBy": null,
+      "resolvedAt": "2026-03-14T04:42:11.959Z"
+    }
+  ]
+}

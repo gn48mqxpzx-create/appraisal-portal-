@@ -230,6 +230,14 @@ export function ReviewQueuePage({ viewerSession }: ReviewQueuePageProps) {
     return buildOverridePreview(workflow?.currentSalary ?? null, overrideInputMode, overrideInputValue);
   }, [overrideInputMode, overrideInputValue, workflow?.currentSalary]);
 
+  const overrideIsValid = useMemo(() => {
+    if (!overridePreview) {
+      return false;
+    }
+
+    return overridePreview.targetSalary >= 0 && overridePreview.increaseAmount >= 0;
+  }, [overridePreview]);
+
   useEffect(() => {
     const evaluateGuardrails = async () => {
       if (decision !== 'OVERRIDE_AND_APPROVE' || !overridePreview) {
@@ -308,12 +316,15 @@ export function ReviewQueuePage({ viewerSession }: ReviewQueuePageProps) {
     }
   };
 
-  const selectedDecisionLabel =
+  const confirmButtonLabel =
     decision === 'APPROVE_AS_SUBMITTED'
-      ? 'Approve as Submitted'
+      ? 'Confirm Approval'
       : decision === 'OVERRIDE_AND_APPROVE'
-      ? 'Override and Approve'
-      : 'Reject';
+        ? 'Confirm Override Approval'
+        : 'Confirm Rejection';
+
+  const canConfirmDecision =
+    !submitting && (decision !== 'OVERRIDE_AND_APPROVE' || overrideIsValid);
 
   if (!viewerSession) {
     return null;
@@ -438,7 +449,6 @@ export function ReviewQueuePage({ viewerSession }: ReviewQueuePageProps) {
                       Reject
                     </button>
                   </div>
-                  <p className={styles.selectionText}>Selected: {selectedDecisionLabel}</p>
                   <textarea
                     className={styles.notesInput}
                     rows={4}
@@ -470,7 +480,7 @@ export function ReviewQueuePage({ viewerSession }: ReviewQueuePageProps) {
                     <input
                       className={styles.overrideInput}
                       type="number"
-                      min="0"
+                      min={overrideInputMode === 'TARGET_SALARY' ? String(Math.max(0, workflow.currentSalary ?? 0)) : '0'}
                       step={overrideInputMode === 'INCREASE_PERCENT' ? '0.01' : '1'}
                       value={overrideInputValue}
                       onChange={(event) => setOverrideInputValue(event.target.value)}
@@ -502,26 +512,10 @@ export function ReviewQueuePage({ viewerSession }: ReviewQueuePageProps) {
                   <button
                     type="button"
                     className={styles.primaryAction}
-                    disabled={submitting}
-                    onClick={() => void handleReviewAction('APPROVE_AS_SUBMITTED')}
+                    disabled={!canConfirmDecision}
+                    onClick={() => void handleReviewAction(decision)}
                   >
-                    Approve
-                  </button>
-                  <button
-                    type="button"
-                    className={styles.secondaryAction}
-                    disabled={submitting || !overridePreview}
-                    onClick={() => void handleReviewAction('OVERRIDE_AND_APPROVE')}
-                  >
-                    Approve with Override
-                  </button>
-                  <button
-                    type="button"
-                    className={styles.rejectAction}
-                    disabled={submitting}
-                    onClick={() => void handleReviewAction('REJECT')}
-                  >
-                    Reject
+                    {confirmButtonLabel}
                   </button>
                 </div>
               </div>
