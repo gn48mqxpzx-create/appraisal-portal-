@@ -13,9 +13,10 @@ interface AppraisalMetrics {
 
 interface DashboardProps {
   viewerSession: ViewerSession | null;
+  onNavigate: (destination: 'cases' | 'review-queue', caseStatusFilter?: string) => void;
 }
 
-export function Dashboard({ viewerSession }: DashboardProps) {
+export function Dashboard({ viewerSession, onNavigate }: DashboardProps) {
   const [metrics, setMetrics] = useState<AppraisalMetrics>({
     eligible: 0,
     draft: 0,
@@ -208,12 +209,49 @@ export function Dashboard({ viewerSession }: DashboardProps) {
             ].map((card) => (
               <div
                 key={card.label}
+                role="button"
+                tabIndex={0}
+                onClick={() => {
+                  if (card.label === 'For Review') {
+                    onNavigate('review-queue');
+                    return;
+                  }
+
+                  if (card.label === 'Draft') {
+                    onNavigate('cases', 'DRAFT');
+                    return;
+                  }
+
+                  if (card.label === 'Submitted') {
+                    onNavigate('cases', 'SUBMITTED_FOR_REVIEW');
+                    return;
+                  }
+
+                  if (card.label === 'Rejected') {
+                    onNavigate('cases', 'REVIEW_REJECTED');
+                    return;
+                  }
+
+                  if (card.label === 'Approved') {
+                    onNavigate('cases', 'APPROVED');
+                    return;
+                  }
+
+                  onNavigate('cases');
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    (event.currentTarget as HTMLDivElement).click();
+                  }
+                }}
                 style={{
                   backgroundColor: '#fff',
                   padding: '16px',
                   borderRadius: '8px',
                   border: '1px solid #e5e7eb',
-                  textAlign: 'center'
+                  textAlign: 'center',
+                  cursor: 'pointer'
                 }}
               >
                 <div style={{ fontSize: '28px', fontWeight: '700', color: card.color, marginBottom: '4px' }}>

@@ -3,6 +3,7 @@ import {
   getLatestWsllEligibilityByStaffId,
   wsllStatusToGateStatus
 } from "./wsllEligibilityService";
+import { getOrBuildWorkingData } from "./employeeWorkingDataService";
 
 const prisma = new PrismaClient();
 
@@ -30,13 +31,15 @@ export async function computeRecommendation(caseId: string, computedBy?: string)
   }
 
   const currentBase = Number(currentCompensation.currentCompensation);
+  const workingData = await getOrBuildWorkingData(caseRecord.staffId);
 
   // Compute tenure months from start date to now
   const startDate = new Date(caseRecord.startDate);
   const now = new Date();
-  const tenureMonths = Math.floor(
+  const fallbackTenureMonths = Math.floor(
     (now.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24 * 30.44)
   );
+  const tenureMonths = workingData?.tenureMonths ?? fallbackTenureMonths;
 
   const tenureBand: TenureBandLabel =
     tenureMonths < 12
@@ -52,33 +55,21 @@ export async function computeRecommendation(caseId: string, computedBy?: string)
   let benchmarkBase = null;
   let catchupPercent = null;
 
-  const roleMapping = await prisma.roleAlignmentMapping.findFirst({
-    where: {
-      sourceRoleName: {
-        equals: caseRecord.staffRole,
-        mode: "insensitive"
-      }
-    },
-    include: {
-      standardizedRole: true
-    }
-  });
-
-  if (roleMapping) {
+  if (workingData?.normalizedRole) {
     benchmark = await prisma.marketValueMatrix.findFirst({
       where: {
         tenureBand,
         OR: [
-          ...(roleMapping.standardizedRoleId
+          ...(workingData.standardizedRoleId
             ? [
                 {
-                  standardizedRoleId: roleMapping.standardizedRoleId
+                  standardizedRoleId: workingData.standardizedRoleId
                 }
               ]
             : []),
           {
             roleName: {
-              equals: roleMapping.standardizedRole?.roleName ?? roleMapping.mappedRoleName,
+              equals: workingData.normalizedRole,
               mode: "insensitive"
             }
           }

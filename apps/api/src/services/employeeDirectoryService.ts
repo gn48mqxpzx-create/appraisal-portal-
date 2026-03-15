@@ -2,6 +2,7 @@ import { PrismaClient, Prisma } from "@prisma/client";
 import { hubspotFetch, fetchHubSpotOwners, resolveOwnerIdByName, HubSpotOwner } from "./hubspotClient";
 import { refreshWorkingDataForEmployees } from "./employeeWorkingDataService";
 import { exportLearnedRecords, reapplyLearnedRecordsAfterRebuild } from "./learnedDataPersistenceService";
+import { resolveInternalCompanyIdentity } from "./companyNormalizationService";
 
 const prisma = new PrismaClient();
 
@@ -158,6 +159,7 @@ interface StaffRow {
   staff_id: string;
   full_name: string;
   email: string;
+  company_name?: string;
   staff_role: string;
   contact_type: string;
   sm_owner_id: string;
@@ -173,6 +175,7 @@ function toStaffRow(record: any): StaffRow {
     staff_id: record.staffId,
     full_name: record.fullName,
     email: record.email,
+    company_name: record.internalCompanyName || record.hubspotCompanyName || "",
     staff_role: record.staffRole,
     contact_type: record.contactType,
     sm_owner_id: record.smName || "",
@@ -220,6 +223,7 @@ async function fetchAllStaffContacts(filterGroups?: any[], updatedAfter?: Date):
         "lastname",
         "email",
         "staff_role",
+        "company",
         "contact_type",
         "sm",
         "senior_success_manager",
@@ -266,6 +270,7 @@ function transformToStaffRow(contact: HubSpotContact): StaffRow {
     staff_id: props.staff_id_number || "",
     full_name: fullName,
     email: props.email || "",
+    company_name: props.company || "",
     staff_role: staffRole,
     contact_type: contactType,
     sm_owner_id: props.sm || "",
@@ -570,8 +575,11 @@ export async function syncEmployeeDirectory(options?: {
         const email = (props.email || "").trim().toLowerCase();
         const contactType = props.contact_type || "";
         const staffRole = props.staff_role || "";
+        const hubspotCompanyName = (props.company || "").trim() || null;
         const smName = props.sm || null;
         const rmName = props.senior_success_manager || null;
+
+        const companyIdentity = await resolveInternalCompanyIdentity(hubspotCompanyName);
 
         // Parse start date
         let staffStartDate: Date | null = null;
@@ -697,6 +705,12 @@ export async function syncEmployeeDirectory(options?: {
               email,
               contactType,
               staffRole,
+              hubspotCompanyName: companyIdentity.hubspotCompanyName,
+              internalCompanyId: companyIdentity.internalCompanyId,
+              internalCompanyName: companyIdentity.internalCompanyName,
+              companyStatus: companyIdentity.companyStatus,
+              companySource: companyIdentity.companySource,
+              companyNormalizedAt: companyIdentity.companyNormalizedAt,
               smName,
               smOwnerId,
               rmName,
@@ -715,6 +729,12 @@ export async function syncEmployeeDirectory(options?: {
               email,
               contactType,
               staffRole,
+              hubspotCompanyName: companyIdentity.hubspotCompanyName,
+              internalCompanyId: companyIdentity.internalCompanyId,
+              internalCompanyName: companyIdentity.internalCompanyName,
+              companyStatus: companyIdentity.companyStatus,
+              companySource: companyIdentity.companySource,
+              companyNormalizedAt: companyIdentity.companyNormalizedAt,
               smName,
               smOwnerId,
               rmName,

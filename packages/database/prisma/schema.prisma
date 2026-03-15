@@ -215,6 +215,11 @@ model AppraisalCase {
   isMissingBenchmark      Boolean     @default(false)
   hasOverride             Boolean     @default(false)
   hasMissingApprovalEvidence Boolean  @default(false)
+  rmOverrideStatus        RmOverrideStatus @default(NOT_REQUIRED)
+  rmOverrideRequestedAt   DateTime?
+  rmOverrideRequestedBy   String?
+  rmOverrideApprovedAt    DateTime?
+  rmOverrideApprovedBy    String?
   
   // Tenure (computed from startDate, stored for consistency in exports)
   tenureMonths            Int?
@@ -250,17 +255,27 @@ model AppraisalCase {
   @@index([companyName])
   @@index([staffRole])
   @@index([status])
+  @@index([rmOverrideStatus])
   @@index([isRemoved])
   @@index([isMissingBenchmark])
   @@index([hasOverride])
   @@map("appraisal_cases")
 }
 
+enum RmOverrideStatus {
+  NOT_REQUIRED
+  REQUESTED
+  APPROVED
+}
+
 enum CaseStatus {
   DRAFT
+  AWAITING_RM_OVERRIDE_APPROVAL
+  RM_OVERRIDE_APPROVED_PENDING_RECOMMENDATION
   SUBMITTED_FOR_REVIEW
   REVIEW_APPROVED
   REVIEW_REJECTED
+  AWAITING_CLIENT_APPROVAL
   PENDING_CLIENT_APPROVAL
   CLIENT_APPROVED
   SUBMITTED_TO_PAYROLL
@@ -1232,6 +1247,12 @@ model EmployeeDirectory {
   email                String
   contactType          String   // "Staff Member - Active", etc. (filtered on sync)
   staffRole            String
+  hubspotCompanyName   String?
+  internalCompanyId    String?
+  internalCompanyName  String?
+  companyStatus        String?
+  companySource        String?
+  companyNormalizedAt  DateTime?
   smName               String?  // Success Manager name (sm field from HubSpot)
   smOwnerId            String?  // SM's own HubSpot owner ID (for SM records, used to link VAs)
   rmName               String?  // Relationship Manager name (senior_success_manager from HubSpot)
@@ -1247,10 +1268,44 @@ model EmployeeDirectory {
   @@index([email])
   @@index([contactType])
   @@index([staffRole])
+  @@index([internalCompanyId])
+  @@index([internalCompanyName])
   @@index([smName])
   @@index([smOwnerId])
   @@index([rmName])
   @@map("employee_directory")
+}
+
+model InternalCompany {
+  id              String    @id @default(uuid())
+  canonicalName   String
+  normalizedKey   String    @unique
+  status          String?   @default("ACTIVE")
+  source          String?   @default("HUBSPOT_CONTACT_COMPANY")
+  normalizedAt    DateTime  @default(now())
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  aliases         CompanyNameAlias[]
+
+  @@index([canonicalName])
+  @@index([normalizedKey])
+  @@map("internal_companies")
+}
+
+model CompanyNameAlias {
+  id                String          @id @default(uuid())
+  rawName           String
+  rawNameNormalized String          @unique
+  internalCompanyId String
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  internalCompany   InternalCompany @relation(fields: [internalCompanyId], references: [id], onDelete: Cascade)
+
+  @@index([internalCompanyId])
+  @@index([rawNameNormalized])
+  @@map("company_name_aliases")
 }
 
 model UserScopeMapping {
@@ -1405,6 +1460,12 @@ model EmployeeWorkingData {
   hubspotContactId     String?
   email                String?
   fullName             String
+  hubspotCompanyName   String?
+  internalCompanyId    String?
+  internalCompanyName  String?
+  companyStatus        String?
+  companySource        String?
+  companyNormalizedAt  DateTime?
 
   // Employment
   contactType          String?
@@ -1449,8 +1510,52 @@ model EmployeeWorkingData {
   updatedAt            DateTime  @updatedAt
 
   @@index([isActiveForAppraisal])
+  @@index([internalCompanyId])
+  @@index([internalCompanyName])
   @@index([normalizedRole])
   @@index([wsllStatus])
   @@index([marketMatrixStatus])
   @@map("employee_working_data")
 }
+
+  // ============================================================================
+  // DATA QUALITY CHECK RUNS — persists each DQ run for history panel
+  // ============================================================================
+
+  model DataQualityCheckRun {
+    id                String    @id @default(uuid())
+    startedAt         DateTime  @default(now())
+    completedAt       DateTime?
+    runBy             String    @default("system")
+    totalIssues       Int       @default(0)
+    highSeverityCount Int       @default(0)
+    medSeverityCount  Int       @default(0)
+    lowSeverityCount  Int       @default(0)
+    reliabilityScore  Int       @default(100)
+    summaryMessage    String?
+
+    @@index([startedAt])
+    @@map("data_quality_check_runs")
+  }
+
+  // ============================================================================
+  // SYSTEM ACTION LOGS — persists major data rebuild / refresh actions
+  // ============================================================================
+
+  model SystemActionLog {
+    id              String    @id @default(uuid())
+    actionType      String    // "WORKING_DATA_REFRESH" | "ROLE_PROPAGATION_REBUILD" | "CORRECTION_APPLIED" | etc.
+    startedAt       DateTime  @default(now())
+    completedAt     DateTime?
+    runBy           String    @default("system")
+    affectedRecords Int       @default(0)
+    recordsRepaired Int?
+    casesRefreshed  Int?
+    failuresCount   Int?
+    status          String    @default("SUCCESS")  // "SUCCESS" | "FAILED" | "RUNNING"
+    summaryMessage  String?
+
+    @@index([actionType, startedAt])
+    @@index([startedAt])
+    @@map("system_action_logs")
+  }

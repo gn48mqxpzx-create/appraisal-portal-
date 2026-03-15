@@ -21,6 +21,7 @@ interface BenchmarkSummary {
   staffId: string;
   fullName: string;
   email: string | null;
+  companyName: string | null;
   rawRole: string | null;
   hubspotRole: string | null;
   normalizedRole: string | null;
@@ -76,7 +77,9 @@ interface WorkflowData {
   caseId: string;
   staffId: string;
   fullName: string;
+  companyName: string | null;
   status: string;
+  rmOverrideStatus: 'NOT_REQUIRED' | 'REQUESTED' | 'APPROVED';
   currentSalary: number | null;
   successManager?: string | null;
   relationshipManager?: string | null;
@@ -133,9 +136,12 @@ function GuardrailBadge({ result, loading }: { result: GuardrailResult | null; l
 
 const WORKFLOW_LABELS: Record<string, string> = {
   DRAFT: 'Draft',
+  AWAITING_RM_OVERRIDE_APPROVAL: 'Awaiting RM Override Approval',
+  RM_OVERRIDE_APPROVED_PENDING_RECOMMENDATION: 'RM Override Approved (Recommendation Pending)',
   SUBMITTED_FOR_REVIEW: 'Submitted for Review',
   REVIEW_APPROVED: 'Review Approved',
   REVIEW_REJECTED: 'Review Rejected',
+  AWAITING_CLIENT_APPROVAL: 'Awaiting Client Approval',
   PENDING_CLIENT_APPROVAL: 'Pending Client Approval',
   CLIENT_APPROVED: 'Client Approved',
   SUBMITTED_TO_PAYROLL: 'Submitted to Payroll'
@@ -380,7 +386,7 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
 
   const benchmarkReady = benchmark?.benchmarkStatus === 'READY';
   const isSubmitted = workflow?.status === 'SUBMITTED_FOR_REVIEW';
-  const isApprovedState = ['REVIEW_APPROVED', 'PENDING_CLIENT_APPROVAL', 'CLIENT_APPROVED', 'SUBMITTED_TO_PAYROLL'].includes(workflow?.status || '');
+  const isApprovedState = ['REVIEW_APPROVED', 'AWAITING_CLIENT_APPROVAL', 'PENDING_CLIENT_APPROVAL', 'CLIENT_APPROVED', 'SUBMITTED_TO_PAYROLL'].includes(workflow?.status || '');
   const isRejected = workflow?.status === 'REVIEW_REJECTED';
   const managerCanEdit = !isSubmitted && !isApprovedState;
   const wsllEligibilityStatus = workflow?.wsllEligibilityStatus ?? 'MISSING_WSLL';
@@ -390,8 +396,12 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
       : 'WSLL data is not available.');
   const classification = workflow?.appraisalClassification ?? null;
   const rmOverrideRequired = classification?.rmApprovalRequired ?? false;
+  const rmOverrideApproved = workflow?.rmOverrideStatus === 'APPROVED';
+  const recommendationLockedByOverride = rmOverrideRequired && !rmOverrideApproved;
   const rmOverrideMessage = rmOverrideRequired
-    ? 'RM override required before final approval.'
+    ? rmOverrideApproved
+      ? 'RM override approved. You may now proceed with the salary recommendation or custom adjustment for this employee.'
+      : 'RM override required before recommendation.'
     : 'Standard Review';
 
   const recommendationBlockerMessages: Partial<Record<BenchmarkStatus, string>> = {
@@ -567,12 +577,61 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
   const canSubmitForReview = useMemo(() => {
     if (!managerCanEdit) return false;
     if (!benchmarkReady) return false;
+    if (recommendationLockedByOverride) return false;
     if (guardrailLoading || !guardrailResult) return false;
     if (selectedRecommendation === 'custom' && !customConfirmed) return false;
     if (guardrailResult.guardrailLevel === 'Red' || guardrailResult.guardrailLevel === 'Unknown') return false;
     if (guardrailResult.guardrailLevel === 'Yellow') return justificationText.trim().length > 0;
     return true;
-  }, [benchmarkReady, customConfirmed, guardrailLoading, guardrailResult, justificationText, managerCanEdit, selectedRecommendation]);
+  }, [benchmarkReady, customConfirmed, guardrailLoading, guardrailResult, justificationText, managerCanEdit, selectedRecommendation, recommendationLockedByOverride]);
+
+  const handleRequestRmOverride = async () => {
+    if (!workflow?.caseId) return;
+    setSubmitting(true);
+    setActionMessage(null);
+    try {
+      const response = await fetch(`http://localhost:3001/cases/${workflow.caseId}/rm-override/request`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requestedBy: viewerSession?.viewer_email || viewerSession?.viewer_name || 'Manager' })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        setActionMessage(payload?.error?.message || 'Failed to request RM override');
+        return;
+      }
+      await loadWorkflow();
+      setActionMessage(payload?.data?.message || 'RM override request submitted.');
+    } catch {
+      setActionMessage('Failed to request RM override');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleApproveRmOverride = async () => {
+    if (!workflow?.caseId) return;
+    setSubmitting(true);
+    setActionMessage(null);
+    try {
+      const response = await fetch(`http://localhost:3001/cases/${workflow.caseId}/rm-override/approve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ approvedBy: viewerSession?.viewer_email || viewerSession?.viewer_name || 'RM' })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        setActionMessage(payload?.error?.message || 'Failed to approve RM override');
+        return;
+      }
+      await loadWorkflow();
+      setActionMessage(payload?.data?.message || 'RM override approved.');
+    } catch {
+      setActionMessage('Failed to approve RM override');
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
   const approvedSummary = workflow?.finalRecommendation || workflow?.submittedRecommendation;
 
@@ -686,6 +745,7 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
 
   const fullName = workflow?.fullName || benchmark?.fullName || '—';
   const email = benchmark?.email || '—';
+  const company = workflow?.companyName || benchmark?.companyName || '—';
   const role = benchmark?.rawRole || '—';
   const startDate = benchmark?.staffStartDate || undefined;
   const tenure = calculateTenure(startDate);
@@ -723,6 +783,10 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
                 <div className={styles.fieldValue}>{email}</div>
               </div>
               <div className={styles.profileField}>
+                <label className={styles.fieldLabel}>Company</label>
+                <div className={styles.fieldValue}>{company}</div>
+              </div>
+              <div className={styles.profileField}>
                 <label className={styles.fieldLabel}>HubSpot Role</label>
                 <div className={styles.fieldValue}>{benchmark?.hubspotRole || benchmark?.rawRole || '—'}</div>
               </div>
@@ -750,7 +814,7 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
                 <label className={styles.fieldLabel}>Success Manager</label>
                 <div className={styles.fieldValue}>{successManager}</div>
               </div>
-              <div className={`${styles.profileField} ${styles.profileFieldFull}`}>
+              <div className={styles.profileField}>
                 <label className={styles.fieldLabel}>Reporting Manager</label>
                 <div className={styles.fieldValue}>{reportingManager}</div>
               </div>
@@ -820,7 +884,7 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
                         {formatMarketPosition(classification.marketPosition)}
                       </span>
                       <span className={`${styles.classificationChip} ${classification.rmApprovalRequired ? styles.chipAmber : styles.chipGreen}`}>
-                        {classification.rmApprovalRequired ? 'RM Override Required' : 'Standard Review'}
+                        {classification.rmApprovalRequired ? (rmOverrideApproved ? 'No WSLL, RM Approved' : 'RM Override Required') : 'Standard Review'}
                       </span>
                     </div>
                     <div className={styles.classificationCategory}>
@@ -837,6 +901,34 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
                     </span>
                   </div>
                 )}
+
+                {recommendationLockedByOverride ? (
+                  <div className={styles.warningBanner}>
+                    Recommendation cards are locked until RM override is approved.
+                    <div style={{ marginTop: 10, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                      {(viewerSession?.role === 'SM' || viewerSession?.role === 'Admin') && (
+                        <button
+                          type="button"
+                          className={styles.inlineActionButton}
+                          disabled={submitting || workflow?.rmOverrideStatus === 'REQUESTED'}
+                          onClick={() => void handleRequestRmOverride()}
+                        >
+                          {workflow?.rmOverrideStatus === 'REQUESTED' ? 'RM Override Requested' : 'Request RM Override'}
+                        </button>
+                      )}
+                      {(viewerSession?.role === 'RM' || viewerSession?.role === 'Admin') && (
+                        <button
+                          type="button"
+                          className={styles.inlineActionButton}
+                          disabled={submitting}
+                          onClick={() => void handleApproveRmOverride()}
+                        >
+                          Approve RM Override
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ) : null}
 
                 {isRejected && workflow?.finalRecommendation?.reviewerNotes ? (
                   <div className={styles.warningBanner}>Reviewer notes: {workflow.finalRecommendation.reviewerNotes}</div>
@@ -911,10 +1003,10 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
                           <button
                             key={option}
                             type="button"
-                            disabled={!benchmarkReady || !managerCanEdit}
+                            disabled={!benchmarkReady || !managerCanEdit || recommendationLockedByOverride}
                             className={`${styles.recommendationCard} ${cardClass} ${selectedRecommendation === option ? styles.recommendationCardSelected : ''}`}
                             onClick={() => setSelectedRecommendation(option)}
-                            style={{ opacity: benchmarkReady && managerCanEdit ? 1 : 0.45, cursor: benchmarkReady && managerCanEdit ? 'pointer' : 'not-allowed' }}
+                            style={{ opacity: benchmarkReady && managerCanEdit && !recommendationLockedByOverride ? 1 : 0.45, cursor: benchmarkReady && managerCanEdit && !recommendationLockedByOverride ? 'pointer' : 'not-allowed' }}
                           >
                             <p className={styles.recommendationName}>{name}</p>
                             <p className={styles.recommendationMetric}>Target: {formatCurrency(recommendation.targetSalary, benchmark.currency)}</p>
@@ -926,7 +1018,7 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
                       })}
                     </div>
 
-                    {selectedRecommendation === 'custom' && benchmarkReady && managerCanEdit ? (
+                    {selectedRecommendation === 'custom' && benchmarkReady && managerCanEdit && !recommendationLockedByOverride ? (
                       <div className={styles.customInputWrap}>
                         <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
                           {([
@@ -993,7 +1085,7 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
                       </div>
                     ) : null}
 
-                    {(selectedRecommendation !== 'custom' || customConfirmed) && managerCanEdit ? (
+                    {(selectedRecommendation !== 'custom' || customConfirmed) && managerCanEdit && !recommendationLockedByOverride ? (
                       <div style={{ marginTop: 20, display: 'flex', flexDirection: 'column', gap: 12 }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
                           <span style={{ fontSize: 13, fontWeight: 600, color: '#374151' }}>Guardrail:</span>
@@ -1053,7 +1145,7 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
               Submit for Review
             </button>
           ) : null}
-          {workflow?.status === 'REVIEW_APPROVED' ? (
+          {workflow?.status === 'AWAITING_CLIENT_APPROVAL' || workflow?.status === 'REVIEW_APPROVED' ? (
             <button type="button" disabled={submitting} className={`${styles.workflowButton} ${styles.workflowSecondary}`} onClick={() => void handleSecureClientApproval()}>
               Secure Client Approval
             </button>

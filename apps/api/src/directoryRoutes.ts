@@ -11,6 +11,7 @@ import {
   validateCanonicalHierarchyMappings
 } from "./services/canonicalHierarchyService";
 import { exportLearnedRecords } from "./services/learnedDataPersistenceService";
+import { logSystemAction } from "./services/dataIntegrityCorrectionService";
 
 const router = Router();
 
@@ -347,6 +348,18 @@ router.post("/sync", async (req: Request, res: Response) => {
     const result = await syncEmployeeDirectory({ triggeredBy: "admin" });
     const hierarchyBackfill = await backfillCanonicalHierarchyMappings();
 
+    await logSystemAction(
+      "DIRECTORY_SYNC",
+      "admin",
+      Number(result.synced ?? 0),
+      result.result === "success" ? "SUCCESS" : "FAILED",
+      `Directory Sync (${result.mode}) completed: synced=${result.synced}, updated=${result.updated}, created=${result.created}, merged=${result.mergedDuplicates}, skipped=${result.skipped}, conflicts=${result.conflicts}, errors=${result.errors.length}`,
+      {
+        recordsRepaired: Number(result.updated ?? 0),
+        failuresCount: Number(result.errors?.length ?? 0)
+      }
+    );
+
     // Run data quality checks in background after sync completes
     runDataQualityChecks().catch((err) =>
       console.warn("[directoryRoutes] Data quality checks failed:", err instanceof Error ? err.message : err)
@@ -357,6 +370,9 @@ router.post("/sync", async (req: Request, res: Response) => {
       hierarchyBackfill
     });
   } catch (_error) {
+    await logSystemAction("DIRECTORY_SYNC", "admin", 0, "FAILED", "Directory sync failed before completion.", {
+      failuresCount: 1
+    }).catch(() => {});
     return res.status(500).json({
       error: "Failed to sync employee directory"
     });

@@ -29,7 +29,9 @@ import {
 import {
   getCaseWorkflowByCaseId,
   getCaseWorkflowByStaffId,
+  getReviewQueueHistory,
   getReviewQueue,
+  recordReviewQueueAction,
   reviewRecommendation,
   submitCaseToPayroll,
   submitRecommendationForReview
@@ -44,7 +46,15 @@ import {
   getAppraisalClassificationForCase,
   getAppraisalClassificationForCases
 } from "./services/appraisalClassificationService";
-import { listDataQualityIssues, getDataQualitySummary, updateIssueStatus, runDataQualityChecks } from "./services/dataQualityService";
+import { listDataQualityIssues, getDataQualitySummary, updateIssueStatus, runDataQualityChecks, getCheckRunHistory } from "./services/dataQualityService";
+import {
+  applyCorrection,
+  rebuildEmployeeWorkingData,
+  closeCasesForEmployee,
+  getRoleSuggestions,
+  logSystemAction,
+  getActionHistory
+} from "./services/dataIntegrityCorrectionService";
 import {
   getWorkingData,
   getOrBuildWorkingData,
@@ -62,6 +72,10 @@ import {
   reapplyLearnedRecordsAfterRebuild,
   validateLearnedDataTargets
 } from "./services/learnedDataPersistenceService";
+import {
+  propagateRoleApprovalBySourceRole,
+  rebuildApprovedRolePropagation
+} from "./services/rolePropagationService";
 
 const app = express();
 const port = Number(process.env.API_PORT ?? 3001);
@@ -733,6 +747,7 @@ app.post("/cycles/ensure-active", async (_req, res) => {
 
 const DASHBOARD_APPROVED_STATUSES = [
   "REVIEW_APPROVED",
+  "AWAITING_CLIENT_APPROVAL",
   "PENDING_CLIENT_APPROVAL",
   "CLIENT_APPROVED",
   "SUBMITTED_TO_PAYROLL",
@@ -1178,21 +1193,24 @@ app.get("/cases", async (req: Request, res: Response) => {
 
     // Pagination parameters (safe defaults)
     const page = Math.max(1, parseInt(req.query.page as string) || 1);
-    const pageSize = Math.max(1, Math.min(100, parseInt(req.query.pageSize as string) || 20));
+    const pageSize = Math.max(1, Math.min(500, parseInt(req.query.pageSize as string) || 50));
     // Filter parameters
-    const status = (req.query.status as string)?.trim();
+    const caseStatus = (req.query.caseStatus as string)?.trim() || (req.query.status as string)?.trim();
     const search = (req.query.search as string)?.trim();
     const staffRole = (req.query.staffRole as string)?.trim();
     const contactType = (req.query.contactType as string)?.trim();
+    const company = (req.query.company as string)?.trim();
+    const wsllStatusFilter = (req.query.wsllStatus as string)?.trim().toUpperCase();
     const includeRemoved = req.query.includeRemoved === "true";
 
     const { items: cases, total } = await getScopedEmployees(viewer, {
       cycleId: activeCycle.id,
       includeRemoved,
-      status,
+      status: caseStatus,
       search,
       staffRole,
       contactType,
+      company,
       page,
       pageSize
     });
@@ -1200,7 +1218,7 @@ app.get("/cases", async (req: Request, res: Response) => {
     const staffIds = [...new Set(cases.map((c) => c.staffId))];
     const workingDataByStaffId = await getWorkingDataBatch(staffIds);
 
-    const items = cases.map((c) => {
+    const rawItems = cases.map((c) => {
       const wd = workingDataByStaffId.get(c.staffId);
       const currentBase = wd?.currentCompensation ?? Number(c.compCurrent?.baseSalary || 0);
       const submittedTargetSalary =
@@ -1248,11 +1266,21 @@ app.get("/cases", async (req: Request, res: Response) => {
             ? "Average WSLL is below 2.8."
             : "WSLL data is required before a recommendation can be created.";
       const classification = wd ? workingDataToClassification(c.id, wd) : null;
+      const rmOverrideRequired = Boolean(classification?.rmApprovalRequired);
+      const rmOverrideStatus = c.rmOverrideStatus;
+
+      const wsllStatusLabel =
+        wsllGateStatus === "PASS"
+          ? "ELIGIBLE"
+          : rmOverrideRequired && rmOverrideStatus !== "APPROVED"
+            ? "NO_WSLL_OVERRIDE_REQUIRED"
+            : "NOT_ELIGIBLE";
 
       return {
         id: c.id,
         staff_id: c.staffId,
         full_name: c.fullName,
+        company: wd?.internalCompanyName ?? wd?.hubspotCompanyName ?? c.companyName ?? null,
         staff_role: wd?.hubspotRole ?? c.staffRole,
         normalized_role: wd?.normalizedRole ?? null,
         contact_type: c.contactType,
@@ -1263,16 +1291,27 @@ app.get("/cases", async (req: Request, res: Response) => {
         updated_at: c.updatedAt,
         closed_at: c.closeDate,
         wsll_gate_status: wsllGateStatus,
+        wsll_status_label: wsllStatusLabel,
         wsll_average: wd?.latestWsllAverage ?? null,
         wsll_blocker_message: wsllBlockerMessage,
+        rm_override_status: rmOverrideStatus,
         appraisal_classification: classification,
         proposed_increase_amount: finalIncreaseAmount ?? submittedIncreaseAmount,
         final_new_base: finalNewBase
       };
     });
 
+    const items = wsllStatusFilter
+      ? rawItems.filter((item) => {
+          if (wsllStatusFilter === "ELIGIBLE") return item.wsll_status_label === "ELIGIBLE";
+          if (wsllStatusFilter === "NOT_ELIGIBLE") return item.wsll_status_label === "NOT_ELIGIBLE";
+          if (wsllStatusFilter === "NO_WSLL_OVERRIDE_REQUIRED") return item.wsll_status_label === "NO_WSLL_OVERRIDE_REQUIRED";
+          return true;
+        })
+      : rawItems;
+
     logHierarchyModuleDebug("cases.list", viewer, {
-      total,
+      total: wsllStatusFilter ? items.length : total,
       returnedCount: items.length,
       page,
       pageSize,
@@ -1405,6 +1444,62 @@ app.get("/review-queue", async (req: Request, res: Response) => {
   }
 });
 
+app.get("/review-queue/history", async (req: Request, res: Response) => {
+  try {
+    const viewer = await resolveScopedViewer(req);
+    if (!viewer) {
+      return res.status(400).json({
+        success: false,
+        error: {
+          message: "Missing required query parameters: viewerRole (ADMIN, SM, RM) and viewerName (for SM/RM)"
+        }
+      });
+    }
+
+    const page = Math.max(1, parseInt(req.query.page as string) || 1);
+    const pageSize = Math.max(1, Math.min(200, parseInt(req.query.pageSize as string) || 50));
+    const actionType = typeof req.query.actionType === "string" ? req.query.actionType.trim() : undefined;
+    const reviewer = typeof req.query.reviewer === "string" ? req.query.reviewer.trim() : undefined;
+    const dateFromRaw = typeof req.query.dateFrom === "string" ? req.query.dateFrom.trim() : "";
+    const dateToRaw = typeof req.query.dateTo === "string" ? req.query.dateTo.trim() : "";
+    const dateFrom = dateFromRaw ? new Date(dateFromRaw) : undefined;
+    const dateTo = dateToRaw ? new Date(dateToRaw) : undefined;
+
+    const hierarchyDebug = await getHierarchyDebugForViewer(req, viewer);
+    const { items, total } = await getReviewQueueHistory(viewer, {
+      page,
+      pageSize,
+      actionType,
+      reviewer,
+      dateFrom: dateFrom && !Number.isNaN(dateFrom.getTime()) ? dateFrom : undefined,
+      dateTo: dateTo && !Number.isNaN(dateTo.getTime()) ? dateTo : undefined
+    });
+
+    logHierarchyModuleDebug("review.history", viewer, {
+      reviewHistoryCount: items.length,
+      total,
+      page,
+      pageSize
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: items,
+      pagination: {
+        total,
+        page,
+        pageSize
+      },
+      hierarchy_debug: hierarchyDebug
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: { message: error instanceof Error ? error.message : "Failed to fetch review history" }
+    });
+  }
+});
+
 // GET /cases/benchmark/:staffId - Resolve case benchmark summary for display
 app.get("/cases/benchmark/:staffId", async (req: Request, res: Response) => {
   try {
@@ -1502,6 +1597,7 @@ app.get("/cases/benchmark/:staffId", async (req: Request, res: Response) => {
       staffId,
       fullName: wd.fullName || caseRecord.fullName || staffId,
       email: wd.email ?? null,
+      companyName: wd.internalCompanyName ?? wd.hubspotCompanyName ?? null,
       // Profile card fields — canonical from Working Data
       hubspotRole: wd.hubspotRole ?? null,
       rawRole: wd.hubspotRole ?? null,
@@ -1593,10 +1689,12 @@ app.get("/cases/:id", async (req: Request, res: Response) => {
         id: true,
         staffId: true,
         fullName: true,
+        companyName: true,
         staffRole: true,
         contactType: true,
         successManagerStaffId: true,
         relationshipManagerStaffId: true,
+        rmOverrideStatus: true,
         status: true,
         createdAt: true,
         updatedAt: true,
@@ -1657,11 +1755,13 @@ app.get("/cases/:id", async (req: Request, res: Response) => {
       id: appraisalCase.id,
       staff_id: appraisalCase.staffId,
       full_name: appraisalCase.fullName,
+      company: workingData?.internalCompanyName ?? workingData?.hubspotCompanyName ?? appraisalCase.companyName ?? null,
       staff_role: appraisalCase.staffRole,
       contact_type: appraisalCase.contactType,
       success_manager: successManager,
       relationship_manager: relationshipManager,
       appraisal_classification: appraisalClassification,
+      rm_override_status: appraisalCase.rmOverrideStatus,
       status: appraisalCase.status,
       created_at: appraisalCase.createdAt,
       updated_at: appraisalCase.updatedAt,
@@ -3128,12 +3228,13 @@ app.post("/cases/:id/recommendation/recompute", express.json(), async (req, res)
 app.post("/cases/:id/recommendation/review", express.json(), async (req, res) => {
   try {
     const { id } = req.params;
-    const { decision, reviewerNotes, reviewedBy, override } = req.body;
+    const { decision, reviewerNotes, reviewedBy, reviewedByRole, override } = req.body;
 
     const data = await reviewRecommendation(id, {
       decision,
       reviewerNotes,
       reviewedBy,
+      reviewedByRole,
       override
     });
 
@@ -3142,6 +3243,203 @@ app.post("/cases/:id/recommendation/review", express.json(), async (req, res) =>
     return res.status(400).json({
       success: false,
       error: { message: error instanceof Error ? error.message : "Failed to review recommendation" }
+    });
+  }
+});
+
+app.post("/cases/:id/rm-override/request", express.json(), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const requestedBy = String(req.body?.requestedBy ?? "system").trim() || "system";
+
+    const caseRecord = await prisma.appraisalCase.findUnique({ where: { id } });
+    if (!caseRecord) {
+      return res.status(404).json({ success: false, error: { message: "Case not found" } });
+    }
+
+    const classification = await getAppraisalClassificationForCase(id);
+    if (!classification?.rmApprovalRequired) {
+      await prisma.appraisalCase.update({
+        where: { id },
+        data: {
+          rmOverrideStatus: "NOT_REQUIRED",
+          rmOverrideRequestedAt: null,
+          rmOverrideRequestedBy: null,
+          rmOverrideApprovedAt: null,
+          rmOverrideApprovedBy: null
+        }
+      });
+      return res.status(400).json({
+        success: false,
+        error: { message: "RM override is not required for this case." }
+      });
+    }
+
+    const updated = await prisma.appraisalCase.update({
+      where: { id },
+      data: {
+        rmOverrideStatus: "REQUESTED",
+        rmOverrideRequestedAt: new Date(),
+        rmOverrideRequestedBy: requestedBy,
+        previousStatus: caseRecord.status,
+        status: "AWAITING_RM_OVERRIDE_APPROVAL" as any
+      }
+    });
+
+    await logSystemAction(
+      "RM_OVERRIDE_REQUESTED",
+      requestedBy,
+      1,
+      "SUCCESS",
+      `RM override requested for case ${id} (${updated.staffId}): ${caseRecord.status} -> ${updated.status}.`
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        caseId: id,
+        rmOverrideStatus: updated.rmOverrideStatus,
+        caseStatus: updated.status,
+        message: "RM override requested and routed to Review Queue. Recommendations remain locked until approval."
+      }
+    });
+  } catch (error) {
+    return res.status(400).json({
+      success: false,
+      error: { message: error instanceof Error ? error.message : "Failed to request RM override" }
+    });
+  }
+});
+
+app.post("/cases/:id/rm-override/approve", express.json(), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const approvedBy = String(req.body?.approvedBy ?? "system").trim() || "system";
+    const actionRole = String(req.body?.actionRole ?? "").trim() || null;
+
+    const caseRecord = await prisma.appraisalCase.findUnique({ where: { id } });
+    if (!caseRecord) {
+      return res.status(404).json({ success: false, error: { message: "Case not found" } });
+    }
+
+    const classification = await getAppraisalClassificationForCase(id);
+    if (!classification?.rmApprovalRequired) {
+      await prisma.appraisalCase.update({
+        where: { id },
+        data: {
+          rmOverrideStatus: "NOT_REQUIRED",
+          rmOverrideRequestedAt: null,
+          rmOverrideRequestedBy: null,
+          rmOverrideApprovedAt: null,
+          rmOverrideApprovedBy: null
+        }
+      });
+      return res.status(400).json({
+        success: false,
+        error: { message: "RM override is not required for this case." }
+      });
+    }
+
+    const updated = await prisma.appraisalCase.update({
+      where: { id },
+      data: {
+        rmOverrideStatus: "APPROVED",
+        rmOverrideApprovedAt: new Date(),
+        rmOverrideApprovedBy: approvedBy,
+        previousStatus: caseRecord.status,
+        status: "RM_OVERRIDE_APPROVED_PENDING_RECOMMENDATION" as any
+      }
+    });
+
+    await recordReviewQueueAction({
+      caseId: id,
+      actionType: "RM_OVERRIDE_APPROVED",
+      actionBy: approvedBy,
+      actionRole,
+      previousStatus: caseRecord.status,
+      newStatus: "RM_OVERRIDE_APPROVED_PENDING_RECOMMENDATION",
+      comment: null
+    });
+
+    await logSystemAction(
+      "RM_OVERRIDE_APPROVED",
+      approvedBy,
+      1,
+      "SUCCESS",
+      `RM override approved for case ${id} (${updated.staffId}): ${caseRecord.status} -> ${updated.status}.`
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        caseId: id,
+        rmOverrideStatus: updated.rmOverrideStatus,
+        caseStatus: updated.status,
+        message: "RM override approved. Case returned to Appraisal Cases for recommendation completion."
+      }
+    });
+  } catch (error) {
+    return res.status(400).json({
+      success: false,
+      error: { message: error instanceof Error ? error.message : "Failed to approve RM override" }
+    });
+  }
+});
+
+app.post("/cases/:id/rm-override/reject", express.json(), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const rejectedBy = String(req.body?.rejectedBy ?? "system").trim() || "system";
+    const actionRole = String(req.body?.actionRole ?? "").trim() || null;
+    const rejectionNote = String(req.body?.note ?? "").trim();
+
+    const caseRecord = await prisma.appraisalCase.findUnique({ where: { id } });
+    if (!caseRecord) {
+      return res.status(404).json({ success: false, error: { message: "Case not found" } });
+    }
+
+    const updated = await prisma.appraisalCase.update({
+      where: { id },
+      data: {
+        rmOverrideStatus: "NOT_REQUIRED",
+        rmOverrideApprovedAt: null,
+        rmOverrideApprovedBy: null,
+        previousStatus: caseRecord.status,
+        status: "DRAFT"
+      }
+    });
+
+    await recordReviewQueueAction({
+      caseId: id,
+      actionType: "RM_OVERRIDE_REJECTED",
+      actionBy: rejectedBy,
+      actionRole,
+      previousStatus: caseRecord.status,
+      newStatus: "DRAFT",
+      comment: rejectionNote || null
+    });
+
+    await logSystemAction(
+      "RM_OVERRIDE_REJECTED",
+      rejectedBy,
+      1,
+      "SUCCESS",
+      `RM override rejected for case ${id} (${updated.staffId}). ${rejectionNote || "No note provided."}`
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        caseId: id,
+        rmOverrideStatus: updated.rmOverrideStatus,
+        caseStatus: updated.status,
+        message: "RM override request rejected. Case returned to draft for SM follow-up."
+      }
+    });
+  } catch (error) {
+    return res.status(400).json({
+      success: false,
+      error: { message: error instanceof Error ? error.message : "Failed to reject RM override" }
     });
   }
 });
@@ -3859,23 +4157,7 @@ const getMappedRoleName = (mapping: { mappedRoleName: string; standardizedRole?:
   mapping.standardizedRole?.roleName ?? mapping.mappedRoleName;
 
 const refreshWorkingDataForSourceRole = async (sourceRoleName: string): Promise<void> => {
-  const rawRole = sourceRoleName.trim();
-  if (!rawRole) {
-    return;
-  }
-
-  const impacted = await prisma.employeeDirectory.findMany({
-    where: {
-      isEmploymentActive: true,
-      staffRole: { equals: rawRole, mode: "insensitive" }
-    },
-    select: { staffId: true }
-  });
-
-  const impactedStaffIds = impacted.map((row) => row.staffId);
-  if (impactedStaffIds.length > 0) {
-    await refreshWorkingDataForEmployees(impactedStaffIds);
-  }
+  await propagateRoleApprovalBySourceRole(sourceRoleName);
 };
 
 const refreshWorkingDataForStandardizedRole = async (payload: {
@@ -4731,13 +5013,14 @@ app.post("/role-library/approve", express.json(), async (req, res) => {
       }
     });
 
-    await refreshWorkingDataForSourceRole(sourceRoleName);
+    const propagation = await propagateRoleApprovalBySourceRole(sourceRoleName);
     await exportLearnedRecords().catch(() => {
       // non-fatal: role mapping is already persisted in DB
     });
 
     return res.status(200).json({
       success: true,
+      propagation,
       data: await prisma.roleAlignmentMapping.findUnique({
         where: { id: saved.id },
         include: { standardizedRole: true }
@@ -4785,13 +5068,14 @@ app.put("/role-library/mappings/:id", express.json(), async (req, res) => {
       }
     });
 
-    await refreshWorkingDataForSourceRole(existingMapping.sourceRoleName);
+    const propagation = await propagateRoleApprovalBySourceRole(existingMapping.sourceRoleName);
     await exportLearnedRecords().catch(() => {
       // non-fatal: role mapping is already persisted in DB
     });
 
     return res.status(200).json({
       success: true,
+      propagation,
       data: await prisma.roleAlignmentMapping.findUnique({
         where: { id: updated.id },
         include: { standardizedRole: true }
@@ -5170,21 +5454,115 @@ app.patch("/admin/data-quality/:id/status", requireAuth, async (req, res) => {
 });
 
 // POST /admin/data-quality/run — trigger data quality checks (admin only)
-app.post("/admin/data-quality/run", requireAuth, async (_req, res) => {
+app.post("/admin/data-quality/run", requireAuth, async (req, res) => {
   try {
-    const detected = await runDataQualityChecks();
-    return res.json({ data: { detected } });
+    const runBy = (req as any).user?.email ?? "admin";
+    const result = await runDataQualityChecks(undefined, runBy);
+    await logSystemAction("DATA_QUALITY_RUN", runBy, result.detected, "SUCCESS",
+      `Data quality check completed. ${result.detected} issue(s). Reliability: ${result.reliabilityScore}%.`);
+    return res.json({ data: { ...result } });
   } catch {
     return res.status(500).json({ error: { message: "Failed to run data quality checks" } });
   }
 });
 
+// GET /admin/data-quality/check-history — recent DataQualityCheckRun records
+app.get("/admin/data-quality/check-history", requireAuth, async (req, res) => {
+  try {
+    const limit = Math.min(50, Math.max(1, Number(req.query.limit ?? 20)));
+    const history = await getCheckRunHistory(limit);
+    return res.json({ data: history });
+  } catch {
+    return res.status(500).json({ error: { message: "Failed to fetch check history" } });
+  }
+});
+
+// GET /admin/data-quality/action-history — recent SystemActionLog records
+app.get("/admin/data-quality/action-history", requireAuth, async (req, res) => {
+  try {
+    const limit = Math.min(50, Math.max(1, Number(req.query.limit ?? 20)));
+    const history = await getActionHistory(limit);
+    return res.json({ data: history });
+  } catch {
+    return res.status(500).json({ error: { message: "Failed to fetch action history" } });
+  }
+});
+
+// GET /admin/data-quality/suggestions — smart role suggestions
+app.get("/admin/data-quality/suggestions", requireAuth, async (req, res) => {
+  try {
+    const rawRole = String(req.query.rawRole ?? "");
+    if (!rawRole.trim()) return res.json({ data: [] });
+    const suggestions = await getRoleSuggestions(rawRole);
+    return res.json({ data: suggestions });
+  } catch {
+    return res.status(500).json({ error: { message: "Failed to fetch role suggestions" } });
+  }
+});
+
+// POST /admin/data-quality/correct — apply corrections to a staff member
+app.post("/admin/data-quality/correct", requireAuth, async (req, res) => {
+  try {
+    const { staffId, issueId, corrections, runBy: bodyRunBy } = req.body as {
+      staffId: string;
+      issueId?: string;
+      corrections: Record<string, unknown>;
+      runBy?: string;
+    };
+    if (!staffId) return res.status(400).json({ error: { message: "staffId is required" } });
+    const runBy = bodyRunBy ?? (req as any).user?.email ?? "admin";
+    const result = await applyCorrection(staffId, issueId ?? null, corrections as any, runBy);
+    return res.json({ data: result });
+  } catch {
+    return res.status(500).json({ error: { message: "Failed to apply correction" } });
+  }
+});
+
+// POST /admin/data-quality/rebuild-employee/:staffId — rebuild WD for one employee
+app.post("/admin/data-quality/rebuild-employee/:staffId", requireAuth, async (req, res) => {
+  try {
+    const { staffId } = req.params;
+    const runBy = (req as any).user?.email ?? "admin";
+    const result = await rebuildEmployeeWorkingData(staffId, runBy);
+    return res.json({ data: result });
+  } catch {
+    return res.status(500).json({ error: { message: "Failed to rebuild employee working data" } });
+  }
+});
+
+// POST /admin/data-quality/close-case/:staffId — close open cases for employee
+app.post("/admin/data-quality/close-case/:staffId", requireAuth, async (req, res) => {
+  try {
+    const { staffId } = req.params;
+    const runBy = (req as any).user?.email ?? "admin";
+    const result = await closeCasesForEmployee(staffId, runBy);
+    return res.json({ data: result });
+  } catch {
+    return res.status(500).json({ error: { message: "Failed to close cases" } });
+  }
+});
+
+// POST /admin/data-quality/revalidate/:staffId — re-run DQ checks for one employee
+app.post("/admin/data-quality/revalidate/:staffId", requireAuth, async (req, res) => {
+  try {
+    const { staffId } = req.params;
+    const runBy = (req as any).user?.email ?? "admin";
+    const result = await runDataQualityChecks([staffId], runBy);
+    return res.json({ data: result });
+  } catch {
+    return res.status(500).json({ error: { message: "Failed to revalidate employee" } });
+  }
+});
+
 // POST /admin/working-data/refresh — rebuild Working Data for all active employees
-app.post("/admin/working-data/refresh", requireAuth, async (_req, res) => {
+app.post("/admin/working-data/refresh", requireAuth, async (req, res) => {
+  const runBy = (req as any).user?.email ?? "admin";
   try {
     const result = await refreshAllWorkingData();
     const learnedReapply = await reapplyLearnedRecordsAfterRebuild();
     await exportLearnedRecords();
+    await logSystemAction("WORKING_DATA_REFRESH", runBy, result.saved, "SUCCESS",
+      `Working data rebuilt for ${result.saved} employee(s). ${result.errors} error(s).`);
     return res.json({
       data: {
         saved: result.saved,
@@ -5194,7 +5572,45 @@ app.post("/admin/working-data/refresh", requireAuth, async (_req, res) => {
       }
     });
   } catch {
+    await logSystemAction("WORKING_DATA_REFRESH", runBy, 0, "FAILED", "Working data refresh failed.");
     return res.status(500).json({ error: { message: "Failed to refresh Working Data" } });
+  }
+});
+
+// POST /admin/role-propagation/rebuild — rebuild approved role write-through into Working Data + cases
+app.post("/admin/role-propagation/rebuild", requireAuth, async (req, res) => {
+  const runBy = (req as any).user?.email ?? "admin";
+  try {
+    const result = await rebuildApprovedRolePropagation();
+    const recheck = await runDataQualityChecks(undefined, runBy);
+    const unresolvedIssues = await prisma.dataQualityIssue.count({
+      where: {
+        issueType: { in: ["APPROVED_ROLE_NOT_PROPAGATED", "APPROVED_ROLE_MISSING_NORMALIZED_ROLE"] },
+        status: { in: ["OPEN", "NEEDS_ADMIN_REVIEW"] }
+      }
+    });
+    const summaryMessage = `Repaired ${result.workingDataSaved} employee record(s), refreshed ${result.openCasesUpdated} open case(s), unresolved issues remain: ${unresolvedIssues}.`;
+
+    await logSystemAction("ROLE_PROPAGATION_REBUILD", runBy, result.impactedEmployees, "SUCCESS",
+      summaryMessage,
+      {
+        recordsRepaired: result.workingDataSaved,
+        casesRefreshed: result.openCasesUpdated,
+        failuresCount: result.workingDataErrors + unresolvedIssues
+      });
+
+    return res.json({
+      data: {
+        ...result,
+        unresolvedIssues,
+        revalidatedIssues: recheck.detected,
+        message: summaryMessage
+      }
+    });
+  } catch (error) {
+    const failureMessage = error instanceof Error ? error.message : "Unknown failure while rebuilding role propagation.";
+    await logSystemAction("ROLE_PROPAGATION_REBUILD", runBy, 0, "FAILED", failureMessage).catch(() => {});
+    return res.status(500).json({ error: { message: `Role propagation repair could not complete: ${failureMessage}` } });
   }
 });
 

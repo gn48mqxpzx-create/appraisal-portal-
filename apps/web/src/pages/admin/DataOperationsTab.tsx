@@ -29,6 +29,7 @@ interface SyncHistoryItem {
   syncedCount: number;
   updatedCount?: number | null;
   createdCount?: number | null;
+  mergedDuplicatesCount?: number | null;
   skippedCount: number;
   errorCount: number;
   conflictCount: number;
@@ -65,6 +66,19 @@ export function DataOperationsTab({ viewerSession }: DataOperationsTabProps) {
     timestamp: string;
   } | null>(null);
   const [compImportError, setCompImportError] = useState<string | null>(null);
+  const [isRebuildingRolePropagation, setIsRebuildingRolePropagation] = useState(false);
+  const [rolePropagationResult, setRolePropagationResult] = useState<{
+    sourceRoles: number;
+    impactedEmployees: number;
+    workingDataSaved: number;
+    workingDataErrors: number;
+    openCasesUpdated: number;
+    caseSnapshotsRefreshed: number;
+    unresolvedIssues?: number;
+    revalidatedIssues?: number;
+    message?: string;
+  } | null>(null);
+  const [rolePropagationError, setRolePropagationError] = useState<string | null>(null);
 
   const isAdmin = viewerSession?.role === 'Admin';
 
@@ -201,6 +215,36 @@ export function DataOperationsTab({ viewerSession }: DataOperationsTabProps) {
     }
   };
 
+  const handleRebuildRolePropagation = async () => {
+    if (!isAdmin || isRebuildingRolePropagation) {
+      return;
+    }
+
+    setIsRebuildingRolePropagation(true);
+    setRolePropagationError(null);
+
+    try {
+      const response = await fetch('http://localhost:3001/admin/role-propagation/rebuild', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${localStorage.getItem('auth_token') || ''}` }
+      });
+
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        setRolePropagationResult(null);
+        setRolePropagationError(data?.error?.message || 'Failed to rebuild role propagation');
+        return;
+      }
+
+      setRolePropagationResult(data?.data || null);
+    } catch (error) {
+      setRolePropagationResult(null);
+      setRolePropagationError(error instanceof Error ? error.message : 'Failed to rebuild role propagation');
+    } finally {
+      setIsRebuildingRolePropagation(false);
+    }
+  };
+
   return (
     <div className={styles.stack}>
       <section className={styles.card}>
@@ -265,14 +309,17 @@ export function DataOperationsTab({ viewerSession }: DataOperationsTabProps) {
                     <th>Synced</th>
                     <th>Updated</th>
                     <th>Created</th>
+                    <th>Merged</th>
                     <th>Skipped</th>
                     <th>Conflicts</th>
+                    <th>Summary</th>
                   </tr>
                 </thead>
                 <tbody>
                   {syncHistory.map((row) => {
                     const updated = row.updatedCount ?? Math.max(0, Number(row.syncedCount || 0) - Number(row.errorCount || 0));
                     const created = row.createdCount ?? null;
+                    const merged = row.mergedDuplicatesCount ?? null;
                     return (
                       <tr key={row.id}>
                         <td>{new Date(row.completedAt || row.startedAt).toLocaleString()}</td>
@@ -281,8 +328,10 @@ export function DataOperationsTab({ viewerSession }: DataOperationsTabProps) {
                         <td>{Number(row.syncedCount || 0)}</td>
                         <td>{updated}</td>
                         <td>{created ?? '—'}</td>
+                        <td>{merged ?? '—'}</td>
                         <td>{Number(row.skippedCount || 0)}</td>
                         <td>{Number(row.conflictCount || 0)}</td>
+                        <td>{row.summaryMessage || '—'}</td>
                       </tr>
                     );
                   })}
@@ -340,6 +389,49 @@ export function DataOperationsTab({ viewerSession }: DataOperationsTabProps) {
             </div>
           ) : !compImportError ? (
             <p className={styles.emptyState}>No current compensation import has been run yet in this session.</p>
+          ) : null}
+        </div>
+      </section>
+
+      <section className={styles.card}>
+        <div className={styles.cardHeader}>
+          <div>
+            <h2 className={styles.sectionTitle}>Role Propagation Repair</h2>
+            <p className={styles.sectionSubtitle}>Rebuild approved role mappings into canonical Working Data and open appraisal cases when approved roles are not appearing correctly.</p>
+          </div>
+
+          <button
+            type="button"
+            onClick={handleRebuildRolePropagation}
+            disabled={isRebuildingRolePropagation}
+            className={`${styles.syncButton} ${isRebuildingRolePropagation ? styles.syncButtonDisabled : ''}`.trim()}
+          >
+            {isRebuildingRolePropagation ? 'Rebuilding...' : 'Rebuild Role Propagation'}
+          </button>
+        </div>
+
+        <div className={styles.statusPanel}>
+          {rolePropagationError && (
+            <p className={styles.errorText}>{rolePropagationError}</p>
+          )}
+
+          {rolePropagationResult ? (
+            <div className={styles.statusGrid}>
+              <p className={styles.statusText}><strong>Approved roles scanned:</strong> {rolePropagationResult.sourceRoles}</p>
+              <p className={styles.statusText}><strong>Impacted employees:</strong> {rolePropagationResult.impactedEmployees}</p>
+              <p className={styles.statusText}><strong>Repaired employee records:</strong> {rolePropagationResult.workingDataSaved} · <strong>Errors:</strong> {rolePropagationResult.workingDataErrors}</p>
+              <p className={styles.statusText}><strong>Open cases updated:</strong> {rolePropagationResult.openCasesUpdated}</p>
+              <p className={styles.statusText}><strong>Case snapshots refreshed:</strong> {rolePropagationResult.caseSnapshotsRefreshed}</p>
+              {typeof rolePropagationResult.unresolvedIssues === 'number' && (
+                <p className={styles.statusText}><strong>Unresolved role propagation issues:</strong> {rolePropagationResult.unresolvedIssues}</p>
+              )}
+              {typeof rolePropagationResult.revalidatedIssues === 'number' && (
+                <p className={styles.statusText}><strong>Revalidated issues in this run:</strong> {rolePropagationResult.revalidatedIssues}</p>
+              )}
+              {rolePropagationResult.message && <p className={styles.statusText}><strong>Message:</strong> {rolePropagationResult.message}</p>}
+            </div>
+          ) : !rolePropagationError ? (
+            <p className={styles.emptyState}>Use this when approved normalized roles are missing in Working Data or open cases.</p>
           ) : null}
         </div>
       </section>

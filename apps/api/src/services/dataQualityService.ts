@@ -59,6 +59,25 @@ export interface DataQualitySummary {
   byCategory: Record<string, number>;
 }
 
+export interface DataQualityRunResult {
+  detected: number;
+  reliabilityScore: number;
+  checkRunId: string | null;
+}
+
+export interface CheckRunHistoryItem {
+  id: string;
+  startedAt: Date;
+  completedAt: Date | null;
+  runBy: string;
+  totalIssues: number;
+  highSeverityCount: number;
+  medSeverityCount: number;
+  lowSeverityCount: number;
+  reliabilityScore: number;
+  summaryMessage: string | null;
+}
+
 // ── Issue persistence helper ──────────────────────────────────────────────────
 
 async function upsertIssue(
@@ -111,7 +130,10 @@ async function autoResolveIssue(staffId: string, issueType: string): Promise<voi
  * Run all anomaly detection checks for the specified staff IDs (or all if empty).
  * Returns the count of new or updated issues found.
  */
-export async function runDataQualityChecks(staffIds?: string[]): Promise<number> {
+export async function runDataQualityChecks(
+  staffIds?: string[],
+  runBy?: string
+): Promise<DataQualityRunResult> {
   console.log("[dataQualityService] Running data quality checks...");
   let detected = 0;
 
@@ -124,6 +146,9 @@ export async function runDataQualityChecks(staffIds?: string[]): Promise<number>
       email: true,
       hubspotContactId: true,
       staffRole: true,
+      hubspotCompanyName: true,
+      internalCompanyId: true,
+      internalCompanyName: true,
       smName: true,
       rmName: true,
       staffStartDate: true,
@@ -137,13 +162,19 @@ export async function runDataQualityChecks(staffIds?: string[]): Promise<number>
         where: { staffId: { in: allStaffIds } },
         select: {
           staffId: true,
+          hubspotCompanyName: true,
+          internalCompanyId: true,
+          internalCompanyName: true,
+          hubspotRole: true,
           normalizedRole: true,
           normalizedRoleStatus: true,
           marketMatrixStatus: true,
           successManagerName: true,
           reportingManagerName: true,
           currentCompensation: true,
-          tenureMonths: true
+          tenureMonths: true,
+          wsllReason: true,
+          rmApprovalRequired: true
         }
       })
     : [];
@@ -174,6 +205,44 @@ export async function runDataQualityChecks(staffIds?: string[]): Promise<number>
     } else {
       // Auto-resolve if no longer duplicated
       await autoResolveIssue(group[0].staffId, "DUPLICATE_EMAIL");
+    }
+  }
+
+  // Missing company / unresolved internal company identity
+  for (const emp of employees) {
+    const wd = workingDataByStaffId.get(emp.staffId);
+    const rawCompany = (wd?.hubspotCompanyName ?? emp.hubspotCompanyName ?? "").trim();
+    const internalCompanyId = (wd?.internalCompanyId ?? emp.internalCompanyId ?? "").trim();
+    const internalCompanyName = (wd?.internalCompanyName ?? emp.internalCompanyName ?? "").trim();
+
+    if (!rawCompany) {
+      await upsertIssue(
+        emp.staffId,
+        emp.fullName,
+        "MISSING_COMPANY_NAME",
+        "IDENTITY",
+        "MEDIUM",
+        `Employee ${emp.fullName} has no HubSpot Company Name value`,
+        { suggestedFix: "Update Company Name on the HubSpot contact and run Directory Sync." }
+      );
+      detected++;
+    } else {
+      await autoResolveIssue(emp.staffId, "MISSING_COMPANY_NAME");
+    }
+
+    if (rawCompany && (!internalCompanyId || !internalCompanyName)) {
+      await upsertIssue(
+        emp.staffId,
+        emp.fullName,
+        "UNRESOLVED_INTERNAL_COMPANY",
+        "IDENTITY",
+        "HIGH",
+        `Employee ${emp.fullName} has company "${rawCompany}" but no resolved internal company identity`,
+        { rawCompanyName: rawCompany, suggestedFix: "Run Directory Sync to resolve internal company identity mapping." }
+      );
+      detected++;
+    } else {
+      await autoResolveIssue(emp.staffId, "UNRESOLVED_INTERNAL_COMPANY");
     }
   }
 
@@ -263,11 +332,18 @@ export async function runDataQualityChecks(staffIds?: string[]): Promise<number>
   const roleMappings = roles.length
     ? await prisma.roleAlignmentMapping.findMany({
         where: { sourceRoleName: { in: roles, mode: "insensitive" } },
-        select: { sourceRoleName: true, confidenceScore: true, matchSource: true }
+        select: {
+          sourceRoleName: true,
+          confidenceScore: true,
+          matchSource: true,
+          mappedRoleName: true,
+          standardizedRole: { select: { roleName: true } }
+        }
       })
     : [];
 
   const mappedRoles = new Set(roleMappings.map((r) => r.sourceRoleName.toLowerCase()));
+  const mappingByRole = new Map(roleMappings.map((mapping) => [mapping.sourceRoleName.toLowerCase(), mapping]));
   const weakRoles = new Set(
     roleMappings
       .filter((r) => r.confidenceScore !== null && Number(r.confidenceScore) < 0.7)
@@ -312,6 +388,27 @@ export async function runDataQualityChecks(staffIds?: string[]): Promise<number>
         detected++;
       } else {
         await autoResolveIssue(emp.staffId, "APPROVED_ROLE_MISSING_NORMALIZED_ROLE");
+
+        const approvedMapping = mappingByRole.get(roleKey);
+        const expectedNormalizedRole = approvedMapping?.standardizedRole?.roleName ?? approvedMapping?.mappedRoleName ?? null;
+        if (expectedNormalizedRole && wd.normalizedRole.trim().toLowerCase() !== expectedNormalizedRole.trim().toLowerCase()) {
+          await upsertIssue(
+            emp.staffId,
+            emp.fullName,
+            "APPROVED_ROLE_NOT_PROPAGATED",
+            "ROLE",
+            "HIGH",
+            `Approved role mapping for "${emp.staffRole}" is not fully propagated to Working Data`,
+            {
+              expectedNormalizedRole,
+              currentNormalizedRole: wd.normalizedRole,
+              suggestedFix: "Run Role Propagation Repair to rebuild approved role write-through."
+            }
+          );
+          detected++;
+        } else {
+          await autoResolveIssue(emp.staffId, "APPROVED_ROLE_NOT_PROPAGATED");
+        }
       }
 
       const normalizedRoleName = wd?.normalizedRole ?? null;
@@ -540,9 +637,196 @@ export async function runDataQualityChecks(staffIds?: string[]): Promise<number>
     }
   }
 
-  console.log(`[dataQualityService] Checks complete. ${detected} issue(s) detected or updated.`);
-  return detected;
+  // ── 8. Open-case cross-checks ────────────────────────────────────────────
+  const allOpenCases = await prisma.appraisalCase.findMany({
+    where: {
+      isRemoved: false,
+      status: { notIn: ["REMOVED_FROM_SCOPE", "PAYROLL_PROCESSED", "LOCKED"] },
+      ...(staffIds?.length ? { staffId: { in: staffIds } } : {})
+    },
+    select: { staffId: true, fullName: true, staffRole: true, status: true, rmOverrideStatus: true }
+  });
+
+  for (const openCase of allOpenCases) {
+    const dir = employeeByStaffId.get(openCase.staffId);
+    const wd = workingDataByStaffId.get(openCase.staffId);
+    const caseName = (openCase.fullName ?? "").trim();
+    const caseRole = (openCase.staffRole ?? "").trim();
+
+    if (!dir) {
+      await upsertIssue(
+        openCase.staffId, openCase.fullName, "OPEN_CASE_MISSING_EMPLOYEE_DIRECTORY", "APPRAISAL", "HIGH",
+        `Open case for ${caseName} (${openCase.staffId}) has no Employee Directory record`,
+        { caseStatus: openCase.status, hubspotRole: caseRole,
+          rootCause: "No employee directory record found",
+          suggestedFix: "Create employee record in HubSpot and run Directory Sync, or correct the Staff ID." }
+      );
+      await upsertIssue(
+        openCase.staffId, openCase.fullName, "STAFF_ID_NOT_FOUND", "IDENTITY", "HIGH",
+        `Staff ID ${openCase.staffId} from open case not found in Employee Directory`,
+        { caseStatus: openCase.status,
+          rootCause: "Staff ID not found in employee directory",
+          suggestedFix: "Correct Staff ID or add employee to Employee Directory." }
+      );
+      detected += 2;
+      continue;
+    } else {
+      await autoResolveIssue(openCase.staffId, "OPEN_CASE_MISSING_EMPLOYEE_DIRECTORY");
+      await autoResolveIssue(openCase.staffId, "STAFF_ID_NOT_FOUND");
+    }
+
+    if (!wd) {
+      await upsertIssue(
+        openCase.staffId, openCase.fullName, "OPEN_CASE_MISSING_WORKING_DATA", "APPRAISAL", "HIGH",
+        `Open case for ${caseName} has no Working Data record`,
+        { caseStatus: openCase.status, hubspotRole: caseRole,
+          rootCause: "Role mapping exists but working data missing",
+          suggestedFix: "Rebuild Working Data to recompute all evaluations." }
+      );
+      detected++;
+    } else {
+      await autoResolveIssue(openCase.staffId, "OPEN_CASE_MISSING_WORKING_DATA");
+
+      if (wd.rmApprovalRequired && openCase.rmOverrideStatus !== "APPROVED") {
+        await upsertIssue(
+          openCase.staffId,
+          openCase.fullName,
+          "OPEN_CASE_REQUIRES_RM_OVERRIDE",
+          "APPRAISAL",
+          "HIGH",
+          `Open case for ${caseName} requires RM override before recommendation submission`,
+          {
+            caseStatus: openCase.status,
+            wsllReason: wd.wsllReason,
+            rmOverrideStatus: openCase.rmOverrideStatus,
+            suggestedFix: "Request and approve RM override before proceeding with recommendations."
+          }
+        );
+        detected++;
+      } else {
+        await autoResolveIssue(openCase.staffId, "OPEN_CASE_REQUIRES_RM_OVERRIDE");
+      }
+    }
+
+    if (!dir.isEmploymentActive) {
+      await upsertIssue(
+        openCase.staffId, openCase.fullName, "OPEN_CASE_INACTIVE_EMPLOYEE", "APPRAISAL", "HIGH",
+        `Employee ${caseName} is inactive but has an open case (${openCase.status})`,
+        { caseStatus: openCase.status, hubspotRole: caseRole,
+          rootCause: "Employee inactive but case still open",
+          suggestedFix: "Reactivate employee in HubSpot or close the appraisal case." }
+      );
+      detected++;
+    } else {
+      await autoResolveIssue(openCase.staffId, "OPEN_CASE_INACTIVE_EMPLOYEE");
+    }
+
+    const dirName = (dir.fullName ?? "").trim();
+    if (caseName && dirName && caseName.toLowerCase() !== dirName.toLowerCase()) {
+      await upsertIssue(
+        openCase.staffId, openCase.fullName, "EMPLOYEE_NAME_MISMATCH", "IDENTITY", "MEDIUM",
+        `Case name "${caseName}" differs from Directory name "${dirName}"`,
+        { caseStatus: openCase.status, caseName, directoryName: dirName,
+          rootCause: "Employee name differs between case and employee directory",
+          suggestedFix: "Update employee name in HubSpot and run Directory Sync." }
+      );
+      detected++;
+    } else {
+      await autoResolveIssue(openCase.staffId, "EMPLOYEE_NAME_MISMATCH");
+    }
+
+    if (wd) {
+      const wdRole = (wd.hubspotRole ?? "").trim();
+      if (caseRole && wdRole && caseRole.toLowerCase() !== wdRole.toLowerCase()) {
+        await upsertIssue(
+          openCase.staffId, openCase.fullName, "ROLE_TEXT_MISMATCH", "ROLE", "MEDIUM",
+          `Case role "${caseRole}" differs from Working Data role "${wdRole}"`,
+          { caseStatus: openCase.status, hubspotRole: caseRole, workingDataRole: wdRole,
+            rootCause: "Raw HubSpot role text mismatch between case and working data",
+            suggestedFix: "Run Directory Sync to refresh role data, or correct the working data role." }
+        );
+        detected++;
+      } else {
+        await autoResolveIssue(openCase.staffId, "ROLE_TEXT_MISMATCH");
+      }
+    }
+
+    if (!compByStaffId.get(openCase.staffId)) {
+      await upsertIssue(
+        openCase.staffId, openCase.fullName, "MISSING_COMPENSATION_DATA", "COMPENSATION", "MEDIUM",
+        `No current compensation record found for ${caseName} (open case)`,
+        { caseStatus: openCase.status,
+          rootCause: "No compensation record on file for this employee",
+          suggestedFix: "Upload Current Compensation CSV for this employee." }
+      );
+      detected++;
+    } else {
+      await autoResolveIssue(openCase.staffId, "MISSING_COMPENSATION_DATA");
+    }
+
+    if (!wd?.successManagerName?.trim() && !dir.smName?.trim()) {
+      await upsertIssue(
+        openCase.staffId, openCase.fullName, "MISSING_SUCCESS_MANAGER", "HIERARCHY", "MEDIUM",
+        `Open case for ${caseName} has no Success Manager assigned`,
+        { caseStatus: openCase.status,
+          rootCause: "No success manager assigned to this employee",
+          suggestedFix: "Update Success Manager in HubSpot and run Directory Sync." }
+      );
+      detected++;
+    } else {
+      await autoResolveIssue(openCase.staffId, "MISSING_SUCCESS_MANAGER");
+    }
+
+    if (!wd?.reportingManagerName?.trim() && !dir.rmName?.trim()) {
+      await upsertIssue(
+        openCase.staffId, openCase.fullName, "MISSING_REPORTING_MANAGER", "HIERARCHY", "LOW",
+        `Open case for ${caseName} has no Reporting Manager assigned`,
+        { caseStatus: openCase.status,
+          rootCause: "No reporting manager assigned to this employee",
+          suggestedFix: "Update Reporting Manager in HubSpot and run Directory Sync." }
+      );
+      detected++;
+    } else {
+      await autoResolveIssue(openCase.staffId, "MISSING_REPORTING_MANAGER");
+    }
+  }
+
+  // ── Reliability score & persistent check run ─────────────────────────────
+  const openIssueCounts = await prisma.dataQualityIssue.findMany({
+    where: { status: { in: ["OPEN", "NEEDS_ADMIN_REVIEW"] } },
+    select: { severity: true }
+  });
+  let totalHigh = 0, totalMedium = 0, totalLow = 0;
+  for (const i of openIssueCounts) {
+    if (i.severity === "HIGH") totalHigh++;
+    else if (i.severity === "MEDIUM") totalMedium++;
+    else totalLow++;
+  }
+  const reliabilityScore = Math.max(0, Math.min(100, 100 - totalHigh * 5 - totalMedium * 2 - totalLow));
+
+  let checkRunId: string | null = null;
+  try {
+    const run = await prisma.dataQualityCheckRun.create({
+      data: {
+        runBy: runBy ?? "system",
+        totalIssues: openIssueCounts.length,
+        highSeverityCount: totalHigh,
+        medSeverityCount: totalMedium,
+        lowSeverityCount: totalLow,
+        reliabilityScore,
+        completedAt: new Date(),
+        summaryMessage: `${detected} issue(s) detected. Reliability: ${reliabilityScore}%.`
+      }
+    });
+    checkRunId = run.id;
+  } catch (err) {
+    console.warn("[dataQualityService] Failed to persist check run:", err instanceof Error ? err.message : err);
+  }
+
+  console.log(`[dataQualityService] Checks complete. ${detected} issue(s) detected. Score: ${reliabilityScore}%.`);
+  return { detected, reliabilityScore, checkRunId };
 }
+
 
 // ── Query helpers ─────────────────────────────────────────────────────────────
 
@@ -614,5 +898,13 @@ export async function updateIssueStatus(
       resolvedAt: status === "RESOLVED" || status === "AUTO_RESOLVED" ? new Date() : undefined,
       resolvedBy: resolvedBy ?? undefined
     }
+  });
+}
+
+/** Fetch recent DataQualityCheckRun records for the history panel */
+export async function getCheckRunHistory(limit = 25): Promise<CheckRunHistoryItem[]> {
+  return prisma.dataQualityCheckRun.findMany({
+    orderBy: { startedAt: "desc" },
+    take: Math.min(100, Math.max(1, limit))
   });
 }

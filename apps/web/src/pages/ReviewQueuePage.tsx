@@ -23,6 +23,23 @@ interface ReviewQueueItem {
   guardrailLevel: string | null;
   submittedBy: string | null;
   submittedDate: string | null;
+  reasonForReview?: string;
+  actionType?: 'RM_OVERRIDE_REQUEST' | 'RECOMMENDATION_REVIEW';
+  rmOverrideStatus?: 'NOT_REQUIRED' | 'REQUESTED' | 'APPROVED';
+}
+
+interface ReviewHistoryItem {
+  id: string;
+  caseId: string;
+  employeeName: string;
+  company: string | null;
+  actionType: string;
+  actionBy: string;
+  actionRole: string | null;
+  actionTimestamp: string;
+  previousStatus: string;
+  newStatus: string;
+  comment: string | null;
 }
 
 interface WorkflowRecommendation {
@@ -46,7 +63,9 @@ interface WorkflowData {
   caseId: string;
   staffId: string;
   fullName: string;
+  companyName?: string | null;
   status: string;
+  rmOverrideStatus?: 'NOT_REQUIRED' | 'REQUESTED' | 'APPROVED';
   currentSalary: number | null;
   submittedRecommendation: WorkflowRecommendation | null;
   finalRecommendation: WorkflowRecommendation | null;
@@ -110,6 +129,7 @@ const buildOverridePreview = (currentSalary: number | null, inputMode: OverrideI
 };
 
 export function ReviewQueuePage({ viewerSession }: ReviewQueuePageProps) {
+  const [activeTab, setActiveTab] = useState<'queue' | 'history'>('queue');
   const [queue, setQueue] = useState<ReviewQueueItem[]>([]);
   const [loadingQueue, setLoadingQueue] = useState(false);
   const [queueError, setQueueError] = useState<string | null>(null);
@@ -125,6 +145,16 @@ export function ReviewQueuePage({ viewerSession }: ReviewQueuePageProps) {
   const [guardrailLoading, setGuardrailLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [banner, setBanner] = useState<string | null>(null);
+  const [history, setHistory] = useState<ReviewHistoryItem[]>([]);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [historyPage, setHistoryPage] = useState(1);
+  const [historyPageSize, setHistoryPageSize] = useState(50);
+  const [historyTotal, setHistoryTotal] = useState(0);
+  const [historyActionTypeFilter, setHistoryActionTypeFilter] = useState('ALL');
+  const [historyReviewerFilter, setHistoryReviewerFilter] = useState('');
+  const [historyDateFrom, setHistoryDateFrom] = useState('');
+  const [historyDateTo, setHistoryDateTo] = useState('');
   const phpToAudRate = useMemo(() => getPhpToAudRate(), []);
 
   const viewerRole = useMemo(() => {
@@ -178,6 +208,77 @@ export function ReviewQueuePage({ viewerSession }: ReviewQueuePageProps) {
   useEffect(() => {
     void loadQueue();
   }, [viewerRole, viewerSession]);
+
+  useEffect(() => {
+    const loadHistory = async () => {
+      if (!viewerSession || !viewerRole || activeTab !== 'history') {
+        return;
+      }
+
+      setLoadingHistory(true);
+      setHistoryError(null);
+
+      try {
+        const params = new URLSearchParams({
+          viewerRole,
+          page: String(historyPage),
+          pageSize: String(historyPageSize)
+        });
+
+        if (viewerRole !== 'ADMIN') {
+          params.set('viewerName', viewerSession.viewer_name);
+          params.set('viewerEmail', viewerSession.viewer_email);
+        }
+
+        if (historyActionTypeFilter !== 'ALL') {
+          params.set('actionType', historyActionTypeFilter);
+        }
+
+        if (historyReviewerFilter.trim()) {
+          params.set('reviewer', historyReviewerFilter.trim());
+        }
+
+        if (historyDateFrom) {
+          params.set('dateFrom', historyDateFrom);
+        }
+
+        if (historyDateTo) {
+          params.set('dateTo', historyDateTo);
+        }
+
+        const response = await fetch(`http://localhost:3001/review-queue/history?${params.toString()}`);
+        const payload = await response.json().catch(() => ({}));
+
+        if (!response.ok) {
+          setHistory([]);
+          setHistoryTotal(0);
+          setHistoryError(payload?.error?.message || 'Failed to load review history');
+          return;
+        }
+
+        setHistory(Array.isArray(payload?.data) ? payload.data as ReviewHistoryItem[] : []);
+        setHistoryTotal(Number(payload?.pagination?.total || 0));
+      } catch {
+        setHistory([]);
+        setHistoryTotal(0);
+        setHistoryError('Failed to load review history');
+      } finally {
+        setLoadingHistory(false);
+      }
+    };
+
+    void loadHistory();
+  }, [
+    activeTab,
+    historyActionTypeFilter,
+    historyDateFrom,
+    historyDateTo,
+    historyPage,
+    historyPageSize,
+    historyReviewerFilter,
+    viewerRole,
+    viewerSession
+  ]);
 
   useEffect(() => {
     const loadWorkflow = async () => {
@@ -283,6 +384,7 @@ export function ReviewQueuePage({ viewerSession }: ReviewQueuePageProps) {
           decision: nextDecision,
           reviewerNotes,
           reviewedBy: viewerSession?.viewer_email || 'Reviewer',
+          reviewedByRole: viewerRole,
           override: nextDecision === 'OVERRIDE_AND_APPROVE'
             ? {
                 inputMode: overrideInputMode,
@@ -316,6 +418,50 @@ export function ReviewQueuePage({ viewerSession }: ReviewQueuePageProps) {
     }
   };
 
+  const handleRmOverrideDecision = async (decision: 'approve' | 'reject') => {
+    if (!workflow) {
+      return;
+    }
+
+    setSubmitting(true);
+    setBanner(null);
+
+    try {
+      const endpoint = decision === 'approve' ? 'approve' : 'reject';
+      const response = await fetch(`http://localhost:3001/cases/${workflow.caseId}/rm-override/${endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(
+          decision === 'approve'
+            ? {
+                approvedBy: viewerSession?.viewer_email || 'RM',
+                actionRole: viewerRole
+              }
+            : {
+                rejectedBy: viewerSession?.viewer_email || 'RM',
+                actionRole: viewerRole,
+                note: reviewerNotes
+              }
+        )
+      });
+
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        setBanner(payload?.error?.message || 'Failed to process RM override task');
+        return;
+      }
+
+      setBanner(payload?.data?.message || (decision === 'approve' ? 'RM override approved.' : 'RM override rejected.'));
+      setSelectedItem(null);
+      setWorkflow(null);
+      await loadQueue();
+    } catch {
+      setBanner('Failed to process RM override task');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   const confirmButtonLabel =
     decision === 'APPROVE_AS_SUBMITTED'
       ? 'Confirm Approval'
@@ -325,6 +471,9 @@ export function ReviewQueuePage({ viewerSession }: ReviewQueuePageProps) {
 
   const canConfirmDecision =
     !submitting && (decision !== 'OVERRIDE_AND_APPROVE' || overrideIsValid);
+
+  const isRmOverrideTask = selectedItem?.actionType === 'RM_OVERRIDE_REQUEST' || workflow?.status === 'AWAITING_RM_OVERRIDE_APPROVAL';
+  const historyTotalPages = Math.max(1, Math.ceil(historyTotal / historyPageSize));
 
   if (!viewerSession) {
     return null;
@@ -336,11 +485,29 @@ export function ReviewQueuePage({ viewerSession }: ReviewQueuePageProps) {
         <div className={styles.header}>
           <div>
             <h1 className={styles.title}>Review Queue</h1>
-            <p className={styles.subtitle}>Cases submitted for review stay here until they are approved, overridden, or rejected.</p>
+            <p className={styles.subtitle}>Queue shows pending reviewer work. History captures completed decisions.</p>
           </div>
-          <div className={styles.summaryPill}>{queue.length} awaiting review</div>
+          <div className={styles.summaryPill}>{activeTab === 'queue' ? `${queue.length} awaiting review` : `${historyTotal} historical actions`}</div>
         </div>
 
+        <div className={styles.tabRow}>
+          <button
+            type="button"
+            className={`${styles.tabButton} ${activeTab === 'queue' ? styles.tabButtonActive : ''}`}
+            onClick={() => setActiveTab('queue')}
+          >
+            Review Queue
+          </button>
+          <button
+            type="button"
+            className={`${styles.tabButton} ${activeTab === 'history' ? styles.tabButtonActive : ''}`}
+            onClick={() => setActiveTab('history')}
+          >
+            History
+          </button>
+        </div>
+
+        {activeTab === 'queue' ? (
         <div className={styles.layout}>
           <section className={styles.queuePane}>
             <div className={styles.paneHeader}>Submitted Cases</div>
@@ -357,7 +524,7 @@ export function ReviewQueuePage({ viewerSession }: ReviewQueuePageProps) {
                 >
                   <div className={styles.queueItemTop}>
                     <strong>{item.employeeName}</strong>
-                    <span className={styles.guardrailBadge}>{item.guardrailLevel || '—'}</span>
+                    <span className={styles.guardrailBadge}>{item.reasonForReview || item.guardrailLevel || '—'}</span>
                   </div>
                   <div className={styles.queueMeta}>{item.client} • {item.role}</div>
                   <div className={styles.queueMetrics}>
@@ -380,50 +547,85 @@ export function ReviewQueuePage({ viewerSession }: ReviewQueuePageProps) {
             {workflowError ? <p className={styles.emptyState}>{workflowError}</p> : null}
             {banner ? <div className={styles.banner}>{banner}</div> : null}
 
-            {workflow && workflow.submittedRecommendation ? (
+            {workflow && (isRmOverrideTask || workflow.submittedRecommendation) ? (
               <div className={styles.panelContent}>
                 <div className={styles.caseHeader}>
                   <div>
                     <h2 className={styles.caseTitle}>{workflow.fullName}</h2>
-                    <p className={styles.caseSubtext}>{workflow.staffId} • Current Salary {formatCompensation(workflow.currentSalary, { view: 'review-queue', caseStatus: workflow.status, conversionRate: phpToAudRate })}</p>
+                    <p className={styles.caseSubtext}>{workflow.staffId} • {workflow.companyName || selectedItem?.client || '—'} • Current Salary {formatCompensation(workflow.currentSalary, { view: 'review-queue', caseStatus: workflow.status, conversionRate: phpToAudRate })}</p>
                   </div>
                   <div className={styles.statusChip}>{workflow.status.replace(/_/g, ' ')}</div>
                 </div>
 
+                {isRmOverrideTask ? (
+                  <div className={styles.card}>
+                    <h3 className={styles.cardTitle}>RM Override Request</h3>
+                    <div className={styles.notesBlock}>
+                      <span className={styles.label}>Reason for review</span>
+                      <p>RM Override Request</p>
+                    </div>
+                    <div className={styles.notesBlock}>
+                      <span className={styles.label}>Submitted by</span>
+                      <p>{selectedItem?.submittedBy || '—'} on {formatDate(selectedItem?.submittedDate)}</p>
+                    </div>
+                    <div className={styles.decisionRow}>
+                      <button
+                        type="button"
+                        className={`${styles.decisionButton} ${styles.decisionButtonActive}`}
+                        disabled={submitting}
+                        onClick={() => void handleRmOverrideDecision('approve')}
+                      >
+                        Approve RM Override
+                      </button>
+                      <button
+                        type="button"
+                        className={styles.decisionButton}
+                        disabled={submitting}
+                        onClick={() => void handleRmOverrideDecision('reject')}
+                      >
+                        Reject RM Override
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+
+                {!isRmOverrideTask ? (
                 <div className={styles.card}>
                   <h3 className={styles.cardTitle}>Submitted Recommendation</h3>
                   <div className={styles.summaryGrid}>
                     <div>
                       <span className={styles.label}>Recommendation Type</span>
-                      <strong>{workflow.submittedRecommendation.recommendationType || '—'}</strong>
+                      <strong>{workflow.submittedRecommendation?.recommendationType || '—'}</strong>
                     </div>
                     <div>
                       <span className={styles.label}>Target Salary</span>
-                      <strong>{formatCompensation(workflow.submittedRecommendation.targetSalary, { view: 'review-queue', caseStatus: workflow.status, conversionRate: phpToAudRate })}</strong>
+                      <strong>{formatCompensation(workflow.submittedRecommendation?.targetSalary, { view: 'review-queue', caseStatus: workflow.status, conversionRate: phpToAudRate })}</strong>
                     </div>
                     <div>
                       <span className={styles.label}>Increase Amount</span>
-                      <strong>{formatCompensation(workflow.submittedRecommendation.increaseAmount, { view: 'review-queue', caseStatus: workflow.status, conversionRate: phpToAudRate })}</strong>
+                      <strong>{formatCompensation(workflow.submittedRecommendation?.increaseAmount, { view: 'review-queue', caseStatus: workflow.status, conversionRate: phpToAudRate })}</strong>
                     </div>
                     <div>
                       <span className={styles.label}>Increase Percent</span>
-                      <strong>{formatPercent(workflow.submittedRecommendation.increasePercent)}</strong>
+                      <strong>{formatPercent(workflow.submittedRecommendation?.increasePercent)}</strong>
                     </div>
                     <div>
                       <span className={styles.label}>Guardrail Level</span>
-                      <strong>{workflow.submittedRecommendation.guardrailLevel || '—'}</strong>
+                      <strong>{workflow.submittedRecommendation?.guardrailLevel || '—'}</strong>
                     </div>
                     <div>
                       <span className={styles.label}>Submitted</span>
-                      <strong>{formatDate(workflow.submittedRecommendation.submittedAt)}</strong>
+                      <strong>{formatDate(workflow.submittedRecommendation?.submittedAt)}</strong>
                     </div>
                   </div>
                   <div className={styles.notesBlock}>
                     <span className={styles.label}>Manager Justification</span>
-                    <p>{workflow.submittedRecommendation.justification || 'No justification provided.'}</p>
+                    <p>{workflow.submittedRecommendation?.justification || 'No justification provided.'}</p>
                   </div>
                 </div>
+                ) : null}
 
+                {!isRmOverrideTask ? (
                 <div className={styles.card}>
                   <h3 className={styles.cardTitle}>Reviewer Decision</h3>
                   <div className={styles.decisionRow}>
@@ -457,8 +659,9 @@ export function ReviewQueuePage({ viewerSession }: ReviewQueuePageProps) {
                     onChange={(event) => setReviewerNotes(event.target.value)}
                   />
                 </div>
+                ) : null}
 
-                {decision === 'OVERRIDE_AND_APPROVE' ? (
+                {decision === 'OVERRIDE_AND_APPROVE' && !isRmOverrideTask ? (
                   <div className={styles.card}>
                     <h3 className={styles.cardTitle}>Override Panel</h3>
                     <div className={styles.modeRow}>
@@ -508,6 +711,7 @@ export function ReviewQueuePage({ viewerSession }: ReviewQueuePageProps) {
                   </div>
                 ) : null}
 
+                {!isRmOverrideTask ? (
                 <div className={styles.actionRow}>
                   <button
                     type="button"
@@ -518,10 +722,136 @@ export function ReviewQueuePage({ viewerSession }: ReviewQueuePageProps) {
                     {confirmButtonLabel}
                   </button>
                 </div>
+                ) : null}
               </div>
             ) : null}
           </section>
         </div>
+        ) : (
+          <section className={styles.historyPane}>
+            <div className={styles.historyFilters}>
+              <select
+                className={styles.historyFilterSelect}
+                aria-label="Filter by action type"
+                title="Filter by action type"
+                value={historyActionTypeFilter}
+                onChange={(event) => {
+                  setHistoryActionTypeFilter(event.target.value);
+                  setHistoryPage(1);
+                }}
+              >
+                <option value="ALL">Action Type: All</option>
+                <option value="RM_OVERRIDE_APPROVED">RM Override Approved</option>
+                <option value="RM_OVERRIDE_REJECTED">RM Override Rejected</option>
+                <option value="RECOMMENDATION_APPROVED">Recommendation Approved</option>
+                <option value="RECOMMENDATION_REJECTED">Recommendation Rejected</option>
+              </select>
+              <input
+                className={styles.historyFilterInput}
+                type="text"
+                aria-label="Filter by reviewer"
+                title="Filter by reviewer"
+                placeholder="Reviewer email contains..."
+                value={historyReviewerFilter}
+                onChange={(event) => {
+                  setHistoryReviewerFilter(event.target.value);
+                  setHistoryPage(1);
+                }}
+              />
+              <input
+                className={styles.historyFilterInput}
+                type="date"
+                aria-label="Filter from date"
+                title="Filter from date"
+                value={historyDateFrom}
+                onChange={(event) => {
+                  setHistoryDateFrom(event.target.value);
+                  setHistoryPage(1);
+                }}
+              />
+              <input
+                className={styles.historyFilterInput}
+                type="date"
+                aria-label="Filter to date"
+                title="Filter to date"
+                value={historyDateTo}
+                onChange={(event) => {
+                  setHistoryDateTo(event.target.value);
+                  setHistoryPage(1);
+                }}
+              />
+            </div>
+
+            {loadingHistory ? <p className={styles.emptyState}>Loading review history...</p> : null}
+            {historyError ? <p className={styles.emptyState}>{historyError}</p> : null}
+            {!loadingHistory && !historyError && history.length === 0 ? <p className={styles.emptyState}>No completed review actions found.</p> : null}
+
+            {!loadingHistory && !historyError && history.length > 0 ? (
+              <div className={styles.historyTableWrap}>
+                <table className={styles.historyTable}>
+                  <thead>
+                    <tr>
+                      <th>Employee</th>
+                      <th>Company</th>
+                      <th>Action Type</th>
+                      <th>Previous Status</th>
+                      <th>New Status</th>
+                      <th>Reviewed By</th>
+                      <th>Date</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {history.map((item) => (
+                      <tr key={item.id}>
+                        <td>{item.employeeName}</td>
+                        <td>{item.company || '—'}</td>
+                        <td>{item.actionType.replace(/_/g, ' ')}</td>
+                        <td>{item.previousStatus.replace(/_/g, ' ')}</td>
+                        <td>{item.newStatus.replace(/_/g, ' ')}</td>
+                        <td>{item.actionBy}{item.actionRole ? ` (${item.actionRole})` : ''}</td>
+                        <td>{formatDate(item.actionTimestamp)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : null}
+
+            <div className={styles.historyPagination}>
+              <span>Page {historyPage} of {historyTotalPages}</span>
+              <select
+                className={styles.historyFilterSelect}
+                aria-label="History page size"
+                title="History page size"
+                value={historyPageSize}
+                onChange={(event) => {
+                  setHistoryPageSize(Number(event.target.value));
+                  setHistoryPage(1);
+                }}
+              >
+                {[25, 50, 100].map((size) => (
+                  <option key={size} value={size}>{size} / page</option>
+                ))}
+              </select>
+              <button
+                type="button"
+                className={styles.decisionButton}
+                onClick={() => setHistoryPage((prev) => Math.max(1, prev - 1))}
+                disabled={historyPage <= 1 || loadingHistory}
+              >
+                Previous
+              </button>
+              <button
+                type="button"
+                className={styles.decisionButton}
+                onClick={() => setHistoryPage((prev) => Math.min(historyTotalPages, prev + 1))}
+                disabled={historyPage >= historyTotalPages || loadingHistory}
+              >
+                Next
+              </button>
+            </div>
+          </section>
+        )}
       </div>
     </div>
   );

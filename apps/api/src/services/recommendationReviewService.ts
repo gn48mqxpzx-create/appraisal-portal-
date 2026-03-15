@@ -9,12 +9,14 @@ import {
   type AppraisalClassification
 } from "./appraisalClassificationService";
 import { getOrBuildWorkingData, getWorkingDataBatch, workingDataToClassification } from "./employeeWorkingDataService";
+import { logSystemAction } from "./dataIntegrityCorrectionService";
 
 const prisma = new PrismaClient();
 
 const SUBMITTABLE_CASE_STATUSES = new Set([
   "DRAFT",
-  "REVIEW_REJECTED"
+  "REVIEW_REJECTED",
+  "RM_OVERRIDE_APPROVED_PENDING_RECOMMENDATION"
 ] as const);
 
 const REVIEWABLE_CASE_STATUS = "SUBMITTED_FOR_REVIEW" as const;
@@ -37,6 +39,7 @@ type ReviewDecisionInput = {
   decision: ReviewDecision;
   reviewerNotes?: string | null;
   reviewedBy?: string | null;
+  reviewedByRole?: string | null;
   override?: {
     recommendationType?: RecommendationType | null;
     inputMode: RecommendationInputMode;
@@ -44,11 +47,38 @@ type ReviewDecisionInput = {
   } | null;
 };
 
+type ReviewQueueHistoryActionType =
+  | "RM_OVERRIDE_APPROVED"
+  | "RM_OVERRIDE_REJECTED"
+  | "RECOMMENDATION_APPROVED"
+  | "RECOMMENDATION_REJECTED";
+
+type ReviewQueueHistoryRecordInput = {
+  caseId: string;
+  actionType: ReviewQueueHistoryActionType;
+  actionBy: string | null;
+  actionRole: string | null;
+  previousStatus: string;
+  newStatus: string;
+  comment?: string | null;
+};
+
+type ReviewQueueHistoryQueryOptions = {
+  page: number;
+  pageSize: number;
+  actionType?: string;
+  reviewer?: string;
+  dateFrom?: Date;
+  dateTo?: Date;
+};
+
 type WorkflowSummary = {
   caseId: string;
   staffId: string;
   fullName: string;
+  companyName: string | null;
   status: string;
+  rmOverrideStatus: "NOT_REQUIRED" | "REQUESTED" | "APPROVED";
   currentSalary: number | null;
   successManager: string | null;
   relationshipManager: string | null;
@@ -225,7 +255,9 @@ const mapWorkflowSummary = async (caseId: string): Promise<WorkflowSummary> => {
     caseId: caseRecord.id,
     staffId: caseRecord.staffId,
     fullName: caseRecord.fullName,
+    companyName: workingData?.internalCompanyName ?? workingData?.hubspotCompanyName ?? caseRecord.companyName ?? null,
     status: caseRecord.status,
+    rmOverrideStatus: caseRecord.rmOverrideStatus,
     currentSalary,
     successManager,
     relationshipManager,
@@ -287,6 +319,11 @@ export async function submitRecommendationForReview(caseId: string, input: Submi
 
   if (!SUBMITTABLE_CASE_STATUSES.has(caseRecord.status as (typeof SUBMITTABLE_CASE_STATUSES extends Set<infer T> ? T : never))) {
     throw new Error(`Case cannot be submitted from status ${caseRecord.status}`);
+  }
+
+  const classification = await getAppraisalClassificationForCase(caseId);
+  if (classification?.rmApprovalRequired && caseRecord.rmOverrideStatus !== "APPROVED") {
+    throw new Error("RM override is required before recommendations can be submitted for NO_WSLL classifications.");
   }
 
   const wsllEligibility = await getLatestWsllEligibilityByStaffId(caseRecord.staffId);
@@ -368,6 +405,14 @@ export async function submitRecommendationForReview(caseId: string, input: Submi
     }
   });
 
+  await logSystemAction(
+    "RECOMMENDATION_SUBMITTED",
+    submittedBy ?? "system",
+    1,
+    "SUCCESS",
+    `Case ${caseId} (${caseRecord.staffId}) submitted for review: ${caseRecord.status} -> SUBMITTED_FOR_REVIEW; target=${roundCurrency(targetSalary)} increase=${roundCurrency(increaseAmount)} (${roundPercent(increasePercent)}%).`
+  );
+
   return mapWorkflowSummary(caseId);
 }
 
@@ -394,13 +439,18 @@ export async function reviewRecommendation(caseId: string, input: ReviewDecision
   }
 
   const appraisalClassification = await getAppraisalClassificationForCase(caseId);
-  if (appraisalClassification?.rmApprovalRequired && input.decision === "APPROVE_AS_SUBMITTED") {
+  if (
+    appraisalClassification?.rmApprovalRequired &&
+    caseRecord.rmOverrideStatus !== "APPROVED" &&
+    input.decision === "APPROVE_AS_SUBMITTED"
+  ) {
     throw new Error("RM override is required for NO_WSLL classifications. Use OVERRIDE_AND_APPROVE.");
   }
 
   const now = new Date();
   const reviewerNotes = (input.reviewerNotes || "").trim() || null;
   const reviewedBy = (input.reviewedBy || "").trim() || null;
+  const reviewedByRole = (input.reviewedByRole || "").trim() || null;
   const updatedByUserId = await resolveUserIdByEmail(reviewedBy);
 
   if (input.decision === "REJECT") {
@@ -427,6 +477,24 @@ export async function reviewRecommendation(caseId: string, input: ReviewDecision
         updatedBy: updatedByUserId
       }
     });
+
+    await recordReviewQueueAction({
+      caseId,
+      actionType: "RECOMMENDATION_REJECTED",
+      actionBy: reviewedBy,
+      actionRole: reviewedByRole,
+      previousStatus: caseRecord.status,
+      newStatus: "REVIEW_REJECTED",
+      comment: reviewerNotes
+    });
+
+    await logSystemAction(
+      "RECOMMENDATION_REVIEW_REJECTED",
+      reviewedBy ?? "system",
+      1,
+      "SUCCESS",
+      `Case ${caseId} (${caseRecord.staffId}) review decision: ${caseRecord.status} -> REVIEW_REJECTED.${reviewerNotes ? ` Notes: ${reviewerNotes}` : ""}`
+    );
 
     return mapWorkflowSummary(caseId);
   }
@@ -486,10 +554,28 @@ export async function reviewRecommendation(caseId: string, input: ReviewDecision
     where: { id: caseId },
     data: {
       previousStatus: caseRecord.status,
-      status: "REVIEW_APPROVED",
+      status: "AWAITING_CLIENT_APPROVAL" as any,
       updatedBy: updatedByUserId
     }
   });
+
+  await recordReviewQueueAction({
+    caseId,
+    actionType: "RECOMMENDATION_APPROVED",
+    actionBy: reviewedBy,
+    actionRole: reviewedByRole,
+    previousStatus: caseRecord.status,
+    newStatus: "AWAITING_CLIENT_APPROVAL",
+    comment: reviewerNotes
+  });
+
+  await logSystemAction(
+    "RECOMMENDATION_REVIEW_APPROVED",
+    reviewedBy ?? "system",
+    1,
+    "SUCCESS",
+    `Case ${caseId} (${caseRecord.staffId}) review decision: ${caseRecord.status} -> AWAITING_CLIENT_APPROVAL; final target=${roundCurrency(finalTargetSalary)} increase=${roundCurrency(finalIncreaseAmount)} (${roundPercent(finalIncreasePercent)}%).`
+  );
 
   return mapWorkflowSummary(caseId);
 }
@@ -517,24 +603,40 @@ export async function getReviewQueue(viewer: { name: string; role: string; email
     return [];
   }
 
+  const reviewStatuses: string[] = ["SUBMITTED_FOR_REVIEW", "AWAITING_RM_OVERRIDE_APPROVAL"];
+
   const whereClause: Prisma.AppraisalCaseWhereInput | null =
     scopedRole === "REVIEWER"
       ? {
-          status: CaseStatus.SUBMITTED_FOR_REVIEW,
-          isRemoved: false
+          isRemoved: false,
+          OR: reviewStatuses.map((status) => ({ status: status as any }))
         }
-      : await getScopedCaseWhere(
-          {
-            role: viewer.role,
-            name: viewer.name,
-            email: viewer.email || null,
-            id: viewer.id || null
-          },
-          {
-            status: "SUBMITTED_FOR_REVIEW",
-            includeRemoved: false
+      : await (async () => {
+          const baseWhere = await getScopedCaseWhere(
+            {
+              role: viewer.role,
+              name: viewer.name,
+              email: viewer.email || null,
+              id: viewer.id || null
+            },
+            {
+              includeRemoved: false
+            } as any
+          );
+
+          if (!baseWhere) {
+            return null;
           }
-        );
+
+          return {
+            AND: [
+              baseWhere,
+              {
+                OR: reviewStatuses.map((status) => ({ status: status as any }))
+              }
+            ]
+          } as Prisma.AppraisalCaseWhereInput;
+        })();
 
   if (!whereClause) {
     return [];
@@ -555,15 +657,16 @@ export async function getReviewQueue(viewer: { name: string; role: string; email
   const workingDataByStaffId = await getWorkingDataBatch(staffIds);
 
   return cases
-    .filter((caseItem) => caseItem.recommendation?.submittedAt)
+    .filter((caseItem) => String(caseItem.status) === "AWAITING_RM_OVERRIDE_APPROVAL" || caseItem.recommendation?.submittedAt)
     .map((caseItem) => {
       const wd = workingDataByStaffId.get(caseItem.staffId);
+      const isRmOverrideTask = String(caseItem.status) === "AWAITING_RM_OVERRIDE_APPROVAL";
       return {
         caseId: caseItem.id,
         staffId: caseItem.staffId,
         employeeName: caseItem.fullName,
-        client: caseItem.companyName,
-        role: caseItem.staffRole,
+        client: wd?.internalCompanyName ?? wd?.hubspotCompanyName ?? caseItem.companyName,
+        role: wd?.hubspotRole ?? caseItem.staffRole,
         currentSalary: wd?.currentCompensation ?? null,
         proposedTargetSalary: caseItem.recommendation?.submittedTargetSalary !== null && caseItem.recommendation?.submittedTargetSalary !== undefined
           ? Number(caseItem.recommendation.submittedTargetSalary)
@@ -572,8 +675,13 @@ export async function getReviewQueue(viewer: { name: string; role: string; email
           ? Number(caseItem.recommendation.submittedIncreasePercent)
           : null,
         guardrailLevel: caseItem.recommendation?.submittedGuardrailLevel ?? null,
-        submittedBy: caseItem.recommendation?.submittedBy ?? null,
-        submittedDate: caseItem.recommendation?.submittedAt?.toISOString() ?? null,
+        submittedBy: isRmOverrideTask ? caseItem.rmOverrideRequestedBy : (caseItem.recommendation?.submittedBy ?? null),
+        submittedDate: isRmOverrideTask
+          ? (caseItem.rmOverrideRequestedAt?.toISOString() ?? null)
+          : (caseItem.recommendation?.submittedAt?.toISOString() ?? null),
+        reasonForReview: isRmOverrideTask ? "RM Override Request" : "Recommendation Review",
+        actionType: isRmOverrideTask ? "RM_OVERRIDE_REQUEST" : "RECOMMENDATION_REVIEW",
+        rmOverrideStatus: caseItem.rmOverrideStatus,
         appraisalCategory: wd ? workingDataToClassification(caseItem.id, wd).appraisalCategory : null,
         rmApprovalRequired: wd?.rmApprovalRequired ?? false,
         wsllStatus: wd?.wsllStatus ?? null,
@@ -582,6 +690,170 @@ export async function getReviewQueue(viewer: { name: string; role: string; email
         marketPosition: wd?.marketPosition ?? null
       };
     });
+}
+
+export async function recordReviewQueueAction(input: ReviewQueueHistoryRecordInput) {
+  const caseRecord = await prisma.appraisalCase.findUnique({
+    where: { id: input.caseId },
+    select: {
+      id: true,
+      staffId: true,
+      fullName: true,
+      companyName: true
+    }
+  });
+
+  if (!caseRecord) {
+    return;
+  }
+
+  const wd = await getOrBuildWorkingData(caseRecord.staffId);
+  const actionTimestamp = new Date();
+
+  await prisma.auditEvent.create({
+    data: {
+      entityType: "REVIEW_QUEUE_ACTION",
+      entityId: caseRecord.id,
+      action: input.actionType,
+      actorEmail: input.actionBy,
+      actorName: input.actionBy,
+      before: {
+        status: input.previousStatus
+      },
+      after: {
+        status: input.newStatus
+      },
+      changes: {
+        caseId: caseRecord.id,
+        employeeName: caseRecord.fullName,
+        company: wd?.internalCompanyName ?? wd?.hubspotCompanyName ?? caseRecord.companyName ?? null,
+        actionType: input.actionType,
+        actionBy: input.actionBy,
+        actionRole: input.actionRole,
+        actionTimestamp: actionTimestamp.toISOString(),
+        previousStatus: input.previousStatus,
+        newStatus: input.newStatus,
+        comment: input.comment ?? null
+      }
+    }
+  });
+}
+
+export async function getReviewQueueHistory(
+  viewer: { name: string; role: string; email?: string; id?: string },
+  options: ReviewQueueHistoryQueryOptions
+) {
+  const scopedRole = normalizeScopedRole(viewer.role);
+  if (!scopedRole) {
+    return {
+      items: [],
+      total: 0
+    };
+  }
+
+  const whereClause: Prisma.AuditEventWhereInput = {
+    entityType: "REVIEW_QUEUE_ACTION"
+  };
+
+  if (options.actionType) {
+    whereClause.action = options.actionType;
+  }
+
+  if (options.reviewer) {
+    whereClause.actorEmail = {
+      contains: options.reviewer,
+      mode: "insensitive"
+    };
+  }
+
+  if (options.dateFrom || options.dateTo) {
+    whereClause.createdAt = {
+      ...(options.dateFrom ? { gte: options.dateFrom } : {}),
+      ...(options.dateTo ? { lte: options.dateTo } : {})
+    };
+  }
+
+  if (scopedRole !== "SITE_LEAD" && scopedRole !== "REVIEWER") {
+    const scopedWhere = await getScopedCaseWhere(
+      {
+        role: viewer.role,
+        name: viewer.name,
+        email: viewer.email || null,
+        id: viewer.id || null
+      },
+      {
+        includeRemoved: false
+      } as any
+    );
+
+    if (!scopedWhere) {
+      return {
+        items: [],
+        total: 0
+      };
+    }
+
+    const scopedCaseIds = await prisma.appraisalCase.findMany({
+      where: scopedWhere,
+      select: { id: true }
+    });
+
+    if (scopedCaseIds.length === 0) {
+      return {
+        items: [],
+        total: 0
+      };
+    }
+
+    whereClause.entityId = {
+      in: scopedCaseIds.map((item) => item.id)
+    };
+  }
+
+  const skip = (options.page - 1) * options.pageSize;
+
+  const [total, events] = await prisma.$transaction([
+    prisma.auditEvent.count({ where: whereClause }),
+    prisma.auditEvent.findMany({
+      where: whereClause,
+      orderBy: { createdAt: "desc" },
+      skip,
+      take: options.pageSize,
+      select: {
+        id: true,
+        entityId: true,
+        action: true,
+        actorEmail: true,
+        createdAt: true,
+        changes: true
+      }
+    })
+  ]);
+
+  const items = events.map((event) => {
+    const changes = event.changes && typeof event.changes === "object" && !Array.isArray(event.changes)
+      ? (event.changes as Record<string, unknown>)
+      : {};
+
+    return {
+      id: event.id,
+      caseId: String(changes.caseId ?? event.entityId),
+      employeeName: String(changes.employeeName ?? "—"),
+      company: changes.company ? String(changes.company) : null,
+      actionType: String(changes.actionType ?? event.action),
+      actionBy: String(changes.actionBy ?? event.actorEmail ?? "system"),
+      actionRole: changes.actionRole ? String(changes.actionRole) : null,
+      actionTimestamp: String(changes.actionTimestamp ?? event.createdAt.toISOString()),
+      previousStatus: String(changes.previousStatus ?? "—"),
+      newStatus: String(changes.newStatus ?? "—"),
+      comment: changes.comment ? String(changes.comment) : null
+    };
+  });
+
+  return {
+    items,
+    total
+  };
 }
 
 export async function submitCaseToPayroll(caseId: string, submittedBy?: string | null) {

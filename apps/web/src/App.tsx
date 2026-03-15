@@ -45,6 +45,8 @@ function App() {
   const [isCheckingSession, setIsCheckingSession] = useState(true);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [selectedStaffId, setSelectedStaffId] = useState<string | null>(null);
+  const [caseStatusFilterFromDashboard, setCaseStatusFilterFromDashboard] = useState<string>('ALL');
+  const [caseFilterVersion, setCaseFilterVersion] = useState<number>(0);
 
   // Check for existing session on mount
   useEffect(() => {
@@ -91,6 +93,17 @@ function App() {
       return;
     }
     setCurrentPage(pageId);
+  };
+
+  const handleDashboardNavigate = (destination: 'cases' | 'review-queue', caseStatusFilter?: string) => {
+    if (destination === 'cases') {
+      setCaseStatusFilterFromDashboard(caseStatusFilter || 'ALL');
+      setCaseFilterVersion((prev) => prev + 1);
+      setCurrentPage('cases');
+      return;
+    }
+
+    setCurrentPage('review-queue');
   };
 
   const handleViewCase = (staffId: string) => {
@@ -159,9 +172,16 @@ function App() {
   const renderPage = () => {
     switch (currentPage) {
       case 'dashboard':
-        return <Dashboard viewerSession={viewerSession} />;
+        return <Dashboard viewerSession={viewerSession} onNavigate={handleDashboardNavigate} />;
       case 'cases':
-        return <AppraisalCases viewerSession={viewerSession} onViewCase={handleViewCase} />;
+        return (
+          <AppraisalCases
+            viewerSession={viewerSession}
+            onViewCase={handleViewCase}
+            initialCaseStatusFilter={caseStatusFilterFromDashboard}
+            filterVersion={caseFilterVersion}
+          />
+        );
       case 'case-detail':
         return selectedStaffId ? (
           <CaseDetailPage 
@@ -170,7 +190,7 @@ function App() {
             onNavigateBack={handleBackToCases}
           />
         ) : (
-          <Dashboard viewerSession={viewerSession} />
+          <Dashboard viewerSession={viewerSession} onNavigate={handleDashboardNavigate} />
         );
       case 'review-queue':
         return <ReviewQueuePage viewerSession={viewerSession} />;
@@ -181,7 +201,7 @@ function App() {
       case 'admin':
         return <AdminConsole viewerSession={viewerSession} />;
       default:
-        return <Dashboard viewerSession={viewerSession} />;
+        return <Dashboard viewerSession={viewerSession} onNavigate={handleDashboardNavigate} />;
     }
   };
 

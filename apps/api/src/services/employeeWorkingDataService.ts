@@ -57,6 +57,12 @@ export type WorkingDataRecord = {
   hubspotContactId: string | null;
   email: string | null;
   fullName: string;
+  hubspotCompanyName: string | null;
+  internalCompanyId: string | null;
+  internalCompanyName: string | null;
+  companyStatus: string | null;
+  companySource: string | null;
+  companyNormalizedAt: Date | null;
   contactType: string | null;
   isActiveForAppraisal: boolean;
   startDate: Date | null;
@@ -257,6 +263,12 @@ async function buildWorkingDataForEmployee(
     hubspotContactId: employee.hubspotContactId,
     email: employee.email || null,
     fullName: employee.fullName,
+    hubspotCompanyName: employee.hubspotCompanyName ?? null,
+    internalCompanyId: employee.internalCompanyId ?? null,
+    internalCompanyName: employee.internalCompanyName ?? null,
+    companyStatus: employee.companyStatus ?? null,
+    companySource: employee.companySource ?? null,
+    companyNormalizedAt: employee.companyNormalizedAt ?? null,
     contactType: employee.contactType || null,
     isActiveForAppraisal: employee.isEmploymentActive,
     startDate: employee.staffStartDate ?? null,
@@ -295,6 +307,12 @@ async function upsertWorkingData(data: WorkingDataRecord): Promise<void> {
       hubspotContactId: data.hubspotContactId,
       email: data.email,
       fullName: data.fullName,
+      hubspotCompanyName: data.hubspotCompanyName,
+      internalCompanyId: data.internalCompanyId,
+      internalCompanyName: data.internalCompanyName,
+      companyStatus: data.companyStatus,
+      companySource: data.companySource,
+      companyNormalizedAt: data.companyNormalizedAt,
       contactType: data.contactType,
       isActiveForAppraisal: data.isActiveForAppraisal,
       startDate: data.startDate,
@@ -325,6 +343,12 @@ async function upsertWorkingData(data: WorkingDataRecord): Promise<void> {
       hubspotContactId: data.hubspotContactId,
       email: data.email,
       fullName: data.fullName,
+      hubspotCompanyName: data.hubspotCompanyName,
+      internalCompanyId: data.internalCompanyId,
+      internalCompanyName: data.internalCompanyName,
+      companyStatus: data.companyStatus,
+      companySource: data.companySource,
+      companyNormalizedAt: data.companyNormalizedAt,
       contactType: data.contactType,
       isActiveForAppraisal: data.isActiveForAppraisal,
       startDate: data.startDate,
@@ -428,6 +452,12 @@ export async function getWorkingData(
     hubspotContactId: row.hubspotContactId,
     email: row.email,
     fullName: row.fullName,
+    hubspotCompanyName: row.hubspotCompanyName,
+    internalCompanyId: row.internalCompanyId,
+    internalCompanyName: row.internalCompanyName,
+    companyStatus: row.companyStatus,
+    companySource: row.companySource,
+    companyNormalizedAt: row.companyNormalizedAt,
     contactType: row.contactType,
     isActiveForAppraisal: row.isActiveForAppraisal,
     startDate: row.startDate ?? null,
@@ -479,6 +509,12 @@ export async function getWorkingDataBatch(
       hubspotContactId: row.hubspotContactId,
       email: row.email,
       fullName: row.fullName,
+      hubspotCompanyName: row.hubspotCompanyName,
+      internalCompanyId: row.internalCompanyId,
+      internalCompanyName: row.internalCompanyName,
+      companyStatus: row.companyStatus,
+      companySource: row.companySource,
+      companyNormalizedAt: row.companyNormalizedAt,
       contactType: row.contactType,
       isActiveForAppraisal: row.isActiveForAppraisal,
       startDate: row.startDate ?? null,

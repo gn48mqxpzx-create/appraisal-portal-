@@ -559,3 +559,376 @@
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+  /* ── Data Integrity Console ── */
+
+  .issueTableWrap {
+    overflow-x: auto;
+  }
+
+  /* Summary metrics row */
+  .summaryMetricsRow {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 4px;
+  }
+
+  .summaryMetricCard {
+    flex: 1 1 130px;
+    min-width: 100px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 16px 12px;
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    border-radius: 10px;
+    text-align: center;
+  }
+
+  .summaryMetricNumber {
+    font-size: 28px;
+    font-weight: 700;
+    color: #111827;
+    line-height: 1.1;
+  }
+
+  .summaryMetricLabel {
+    font-size: 11px;
+    color: #6b7280;
+    margin-top: 4px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+
+  /* Reliability card */
+  .reliabilityCard {
+    flex: 1 1 180px;
+    min-width: 160px;
+    padding: 16px 18px;
+    background: #f0fdf4;
+    border: 1px solid #bbf7d0;
+    border-radius: 10px;
+  }
+
+  .reliabilityScoreRow {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+  }
+
+  .reliabilityScoreNum {
+    font-size: 34px;
+    font-weight: 800;
+    color: #111827;
+    line-height: 1;
+  }
+
+  .reliabilityLabel {
+    font-size: 11px;
+    color: #6b7280;
+    margin: 4px 0 8px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+
+  .reliabilityBadge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 99px;
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  .reliabilityExcellent {
+    background: #d1fae5;
+    color: #065f46;
+    border: 1px solid #6ee7b7;
+  }
+
+  .reliabilityGood {
+    background: #dbeafe;
+    color: #1e40af;
+    border: 1px solid #93c5fd;
+  }
+
+  .reliabilityAttention {
+    background: #fef9c3;
+    color: #713f12;
+    border: 1px solid #fde047;
+  }
+
+  .reliabilityCritical {
+    background: #fee2e2;
+    color: #991b1b;
+    border: 1px solid #fca5a5;
+  }
+
+  .scoreBreakdown {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  /* Green chip for SUCCESS status */
+  .chipGreen {
+    background: #d1fae5;
+    color: #065f46;
+  }
+
+  /* History section */
+  .historyToggle {
+    width: 100%;
+    text-align: left;
+    padding: 8px 4px;
+    background: none;
+    border: none;
+    font-size: 13px;
+    font-weight: 600;
+    color: #374151;
+    cursor: pointer;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  .historyToggle:hover {
+    color: #111827;
+  }
+
+  .historyContent {
+    margin-top: 14px;
+  }
+
+  .historySubtitle {
+    font-size: 13px;
+    font-weight: 600;
+    color: #374151;
+    margin: 0 0 8px;
+  }
+
+  .historyTable {
+    font-size: 12px;
+  }
+
+  .historyTableEmpty {
+    font-size: 13px;
+    color: #9ca3af;
+    padding: 8px 0;
+  }
+
+  /* Action button group */
+  .actionBtnGroup {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  /* Modal */
+  .modalOverlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.4);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+  }
+
+  .modal {
+    background: #fff;
+    border-radius: 12px;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2);
+    width: 100%;
+    max-width: 520px;
+    max-height: 90vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .modalHeader {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 20px;
+    border-bottom: 1px solid #e5e7eb;
+  }
+
+  .modalTitle {
+    font-size: 15px;
+    font-weight: 700;
+    color: #111827;
+  }
+
+  .modalClose {
+    background: none;
+    border: none;
+    font-size: 20px;
+    cursor: pointer;
+    color: #6b7280;
+    line-height: 1;
+    padding: 2px 6px;
+  }
+
+  .modalClose:hover {
+    color: #111827;
+  }
+
+  .modalBody {
+    padding: 20px;
+    overflow-y: auto;
+    flex: 1;
+  }
+
+  .modalFooter {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    padding: 14px 20px;
+    border-top: 1px solid #e5e7eb;
+  }
+
+  /* Form elements inside modal */
+  .formRow {
+    margin-bottom: 14px;
+  }
+
+  .formLabel {
+    display: block;
+    font-size: 13px;
+    font-weight: 500;
+    color: #374151;
+    margin-bottom: 4px;
+  }
+
+  .formInput {
+    width: 100%;
+    padding: 7px 10px;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    font-size: 13px;
+    color: #111827;
+    box-sizing: border-box;
+  }
+
+  .formInput:focus {
+    outline: none;
+    border-color: #6366f1;
+    box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.15);
+  }
+
+  .formCheck {
+    margin-right: 6px;
+    cursor: pointer;
+  }
+
+  /* Buttons */
+  .btnPrimary {
+    padding: 7px 18px;
+    background: #6366f1;
+    color: #fff;
+    border: none;
+    border-radius: 7px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .btnPrimary:hover:not(:disabled) {
+    background: #4f46e5;
+  }
+
+  .btnPrimary:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .btnDanger {
+    padding: 7px 18px;
+    background: #dc2626;
+    color: #fff;
+    border: none;
+    border-radius: 7px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .btnDanger:hover:not(:disabled) {
+    background: #b91c1c;
+  }
+
+  .btnDanger:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .btnGhost {
+    padding: 7px 18px;
+    background: #fff;
+    color: #374151;
+    border: 1px solid #d1d5db;
+    border-radius: 7px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+
+  .btnGhost:hover:not(:disabled) {
+    background: #f9fafb;
+  }
+
+  .btnGhost:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  /* Smart role suggestions */
+  .suggestionList {
+    margin-top: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .suggestionItem {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 10px;
+    background: #f9fafb;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    font-size: 12px;
+    cursor: pointer;
+    text-align: left;
+    width: 100%;
+  }
+
+  .suggestionItem:hover {
+    background: #eff6ff;
+    border-color: #bfdbfe;
+  }
+
+  .suggestionArrow {
+    color: #9ca3af;
+    flex-shrink: 0;
+  }
+
+  .suggestionScore {
+    margin-left: auto;
+    color: #6b7280;
+    font-weight: 600;
+    font-size: 11px;
+  }
+
+  /* Error text */
+  .errorText {
+    color: #dc2626;
+    font-size: 13px;
+    margin: 6px 0;
+  }

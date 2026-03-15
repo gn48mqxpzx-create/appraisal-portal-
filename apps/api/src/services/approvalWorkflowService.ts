@@ -141,8 +141,9 @@ export async function secureClientApproval(caseId: string, createdBy: string) {
     throw new Error("Case not found");
   }
 
-  if (caseRecord.status !== "REVIEW_APPROVED") {
-    throw new Error("Case must be review approved to secure client approval");
+  const caseStatus = String(caseRecord.status);
+  if (caseStatus !== "REVIEW_APPROVED" && caseStatus !== "AWAITING_CLIENT_APPROVAL") {
+    throw new Error("Case must be awaiting client approval before secure client approval can proceed");
   }
 
   // Update approval workflow

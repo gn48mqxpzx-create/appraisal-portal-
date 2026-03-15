@@ -30,6 +30,7 @@ export type ScopedEmployeeQueryOptions = {
   search?: string;
   staffRole?: string;
   contactType?: string;
+  company?: string;
 };
 
 type ScopedCaseFilterOptions = Omit<ScopedEmployeeQueryOptions, "page" | "pageSize">;
@@ -44,11 +45,13 @@ export type ScopedEmployeeCaseRecord = {
   id: string;
   staffId: string;
   fullName: string;
+  companyName: string;
   staffRole: string;
   contactType: string;
   successManagerStaffId: string | null;
   relationshipManagerStaffId: string | null;
   status: string;
+  rmOverrideStatus: string;
   createdAt: Date;
   updatedAt: Date;
   closeDate: Date | null;
@@ -176,6 +179,10 @@ export async function getScopedCaseWhere(
     whereClause.contactType = { equals: requestedType, mode: "insensitive" };
   }
 
+  if (options.company) {
+    whereClause.companyName = { contains: options.company.trim(), mode: "insensitive" };
+  }
+
   if (options.search) {
     whereClause.OR = [
       { staffId: { contains: options.search, mode: "insensitive" } },
@@ -296,11 +303,13 @@ export async function getScopedCases(user: ScopedEmployeeUser, options: ScopedEm
         id: true,
         staffId: true,
         fullName: true,
+        companyName: true,
         staffRole: true,
         contactType: true,
         successManagerStaffId: true,
         relationshipManagerStaffId: true,
         status: true,
+        rmOverrideStatus: true,
         createdAt: true,
         updatedAt: true,
         closeDate: true,

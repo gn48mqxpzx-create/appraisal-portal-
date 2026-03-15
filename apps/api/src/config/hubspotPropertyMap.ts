@@ -3,6 +3,7 @@ export const HUBSPOT_CONTACT_PROPS = {
   contactType: "contact_type",
   staffId: "staff_id_number",
   staffRole: "staff_role",
+  companyName: "company",
   staffStartDate: "staff_start_date",
   relationshipManager: "senior_success_manager",
   successManager: "sm"

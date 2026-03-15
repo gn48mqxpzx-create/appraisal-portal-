@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "exportedAt": "2026-03-14T15:27:05.399Z",
+  "exportedAt": "2026-03-15T01:29:37.195Z",
   "standardizedRoles": [
     {
       "roleName": "Accountant",
@@ -175,7 +175,7 @@
       "mappedRoleName": "Credit Analyst",
       "standardizedRoleName": "Credit Analyst",
       "matchSource": "ADMIN_CONFIRMED",
-      "confidenceScore": 0.82
+      "confidenceScore": null
     },
     {
       "sourceRoleName": "Banking Officer",
@@ -189,7 +189,7 @@
       "mappedRoleName": "Business Development Associate",
       "standardizedRoleName": "Business Development Associate",
       "matchSource": "ADMIN_CONFIRMED",
-      "confidenceScore": 0
+      "confidenceScore": null
     },
     {
       "sourceRoleName": "Buying Assistant",
@@ -224,7 +224,7 @@
       "mappedRoleName": "Collections Officer",
       "standardizedRoleName": "Collections Officer",
       "matchSource": "ADMIN_CONFIRMED",
-      "confidenceScore": 0.3333
+      "confidenceScore": null
     },
     {
       "sourceRoleName": "Corporate Administrator",
@@ -294,35 +294,35 @@
       "mappedRoleName": "Fp Intern",
       "standardizedRoleName": "Fp Intern",
       "matchSource": "ADMIN_CONFIRMED",
-      "confidenceScore": 0.25
+      "confidenceScore": null
     },
     {
       "sourceRoleName": "Financial Planner",
       "mappedRoleName": "Financial Planner",
       "standardizedRoleName": "Financial Planner",
       "matchSource": "ADMIN_CONFIRMED",
-      "confidenceScore": 0
+      "confidenceScore": null
     },
     {
       "sourceRoleName": "Financial Planning VA (FP VA)",
       "mappedRoleName": "Financial Planner",
       "standardizedRoleName": "Financial Planner",
       "matchSource": "ADMIN_CONFIRMED",
-      "confidenceScore": 0.25
+      "confidenceScore": null
     },
     {
       "sourceRoleName": "General Administrator",
       "mappedRoleName": "General Administrator",
       "standardizedRoleName": "General Administrator",
       "matchSource": "ADMIN_CONFIRMED",
-      "confidenceScore": 0
+      "confidenceScore": null
     },
     {
       "sourceRoleName": "General VA",
       "mappedRoleName": "General Virtual Assistant",
       "standardizedRoleName": "General Virtual Assistant",
       "matchSource": "ADMIN_CONFIRMED",
-      "confidenceScore": 0.3333
+      "confidenceScore": null
     },
     {
       "sourceRoleName": "General Virtual Assistant",
@@ -364,21 +364,21 @@
       "mappedRoleName": "Parapplaner",
       "standardizedRoleName": "Parapplaner",
       "matchSource": "ADMIN_CONFIRMED",
-      "confidenceScore": 0
+      "confidenceScore": null
     },
     {
       "sourceRoleName": "MB - Broker Support",
       "mappedRoleName": "Mortgage Broking",
       "standardizedRoleName": "Mortgage Broking",
       "matchSource": "ADMIN_CONFIRMED",
-      "confidenceScore": 0.82
+      "confidenceScore": null
     },
     {
       "sourceRoleName": "MB - Managed Services",
       "mappedRoleName": "Mortgage Broking",
       "standardizedRoleName": "Mortgage Broking",
       "matchSource": "ADMIN_CONFIRMED",
-      "confidenceScore": 0.2
+      "confidenceScore": null
     },
     {
       "sourceRoleName": "MB - Repricing Specialist",
@@ -399,7 +399,7 @@
       "mappedRoleName": "Mortgage Broking",
       "standardizedRoleName": "Mortgage Broking",
       "matchSource": "ADMIN_CONFIRMED",
-      "confidenceScore": 0.25
+      "confidenceScore": null
     },
     {
       "sourceRoleName": "Member Concierge",
@@ -427,7 +427,7 @@
       "mappedRoleName": "Mortgage Broking",
       "standardizedRoleName": "Mortgage Broking",
       "matchSource": "ADMIN_CONFIRMED",
-      "confidenceScore": 0.82
+      "confidenceScore": null
     },
     {
       "sourceRoleName": "Mortgage Broking - VA;MB Admin 2 / Loan Processor",
@@ -441,7 +441,7 @@
       "mappedRoleName": "Onboarding Officer",
       "standardizedRoleName": "Onboarding Officer",
       "matchSource": "ADMIN_CONFIRMED",
-      "confidenceScore": 0.3333
+      "confidenceScore": null
     },
     {
       "sourceRoleName": "Onboarding Specialist",
@@ -462,14 +462,14 @@
       "mappedRoleName": "Paralegal",
       "standardizedRoleName": "Paralegal",
       "matchSource": "ADMIN_CONFIRMED",
-      "confidenceScore": 0
+      "confidenceScore": null
     },
     {
       "sourceRoleName": "Payroll",
       "mappedRoleName": "Payroll",
       "standardizedRoleName": "Payroll",
       "matchSource": "ADMIN_CONFIRMED",
-      "confidenceScore": 0
+      "confidenceScore": null
     },
     {
       "sourceRoleName": "Portfolio Administration Associate",
@@ -483,14 +483,14 @@
       "mappedRoleName": "Team Lead",
       "standardizedRoleName": "Team Lead",
       "matchSource": "ADMIN_CONFIRMED",
-      "confidenceScore": 0.82
+      "confidenceScore": null
     },
     {
       "sourceRoleName": "Sales - Direct",
       "mappedRoleName": "Sales",
       "standardizedRoleName": "Sales",
       "matchSource": "ADMIN_CONFIRMED",
-      "confidenceScore": 0
+      "confidenceScore": null
     },
     {
       "sourceRoleName": "Senior Client Support Officer",
@@ -518,28 +518,28 @@
       "mappedRoleName": "Settlements Officer",
       "standardizedRoleName": "Settlements Officer",
       "matchSource": "ADMIN_CONFIRMED",
-      "confidenceScore": 0.3333
+      "confidenceScore": null
     },
     {
       "sourceRoleName": "Software Engineer",
       "mappedRoleName": "Software Engineer",
       "standardizedRoleName": "Software Engineer",
       "matchSource": "ADMIN_CONFIRMED",
-      "confidenceScore": 0
+      "confidenceScore": null
     },
     {
       "sourceRoleName": "Success Manager",
       "mappedRoleName": "Success Manager",
       "standardizedRoleName": "Success Manager",
       "matchSource": "ADMIN_CONFIRMED",
-      "confidenceScore": 0.3333
+      "confidenceScore": null
     },
     {
       "sourceRoleName": "Team Lead",
       "mappedRoleName": "Team Lead",
       "standardizedRoleName": "Team Lead",
       "matchSource": "ADMIN_CONFIRMED",
-      "confidenceScore": 0
+      "confidenceScore": null
     },
     {
       "sourceRoleName": "Team Manager",
