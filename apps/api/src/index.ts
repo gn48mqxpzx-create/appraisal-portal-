@@ -36,9 +36,15 @@ import {
   submitCaseToPayroll,
   submitRecommendationForReview
 } from "./services/recommendationReviewService";
+import {
+  filterCanonicalAppraisalDataset,
+  getCanonicalAppraisalDataset,
+  getCanonicalDatasetMetrics,
+  getDistinctNormalizedRoles,
+  toCaseListItem
+} from "./services/canonicalAppraisalDatasetService";
 import { ALLOWED_APPRAISAL_CONTACT_TYPES, getScopedCaseWhere, getScopedEmployees } from "./services/employeeScopeService";
 import { resolveViewerHierarchy } from "./services/hierarchyResolutionService";
-import { getLatestWsllEligibilityByStaffIds } from "./services/wsllEligibilityService";
 import { getSMDirectory, resolveManagerNamesForCases, getLastSyncRecord, getSyncHistory } from "./services/employeeDirectoryService";
 import { resolveViewerByEmail, ViewerNotFoundError } from "./services/viewerResolutionService";
 import {
@@ -745,23 +751,10 @@ app.post("/cycles/ensure-active", async (_req, res) => {
   }
 });
 
-const DASHBOARD_APPROVED_STATUSES = [
-  "REVIEW_APPROVED",
-  "AWAITING_CLIENT_APPROVAL",
-  "PENDING_CLIENT_APPROVAL",
-  "CLIENT_APPROVED",
-  "SUBMITTED_TO_PAYROLL",
-  "PAYROLL_PENDING",
-  "PAYROLL_PROCESSED",
-  "RELEASED_TO_PAYROLL"
-];
-
-const DASHBOARD_REJECTED_STATUSES = ["REVIEW_REJECTED"];
-
 const getDashboardSummary = async (req: Request, res: Response) => {
   try {
     const activeCycle = await ensureActiveCycle();
-    const viewer = getViewer(req);
+    const viewer = await resolveScopedViewer(req);
     if (!viewer) {
       return res.status(400).json({
         success: false,
@@ -773,68 +766,88 @@ const getDashboardSummary = async (req: Request, res: Response) => {
 
     const hierarchyDebug = await getHierarchyDebugForViewer(req, viewer);
 
-    const scopedWhere = await getScopedCaseWhere(viewer, {
+    const canonicalRows = await getCanonicalAppraisalDataset({
+      viewer,
       cycleId: activeCycle.id,
       includeRemoved: false
     });
 
-    if (!scopedWhere) {
-      return res.status(200).json({
-        success: true,
-        data: {
-          eligible: 0,
-          draft: 0,
-          submitted: 0,
-          forReview: 0,
-          approved: 0,
-          rejected: 0,
-          activeCycleId: activeCycle.id
-        }
-      });
+    const metrics = getCanonicalDatasetMetrics(canonicalRows);
+    const workflowCounts = metrics.workflowCounts;
+    const forReview = metrics.reviewQueuePending;
+    const wsllEligibleVas = metrics.coverage.eligible;
+    const wsllNotEligibleVas = metrics.coverage.notEligible;
+    const overrideRequiredNoWsll = metrics.coverage.overrideRequired;
+    const approvedCount = workflowCounts.APPROVED;
+
+    const tenureBuckets = {
+      "0-1 years": 0,
+      "1-3 years": 0,
+      "3-5 years": 0,
+      "5+ years": 0
+    };
+
+    const uniqueEmployeeRows = [...new Map(canonicalRows.map((row) => [row.employee_id, row])).values()];
+
+    for (const row of uniqueEmployeeRows) {
+      const months = row.tenure_months;
+      if (typeof months !== "number") {
+        continue;
+      }
+
+      const years = months / 12;
+      if (years < 1) {
+        tenureBuckets["0-1 years"] += 1;
+      } else if (years < 3) {
+        tenureBuckets["1-3 years"] += 1;
+      } else if (years < 5) {
+        tenureBuckets["3-5 years"] += 1;
+      } else {
+        tenureBuckets["5+ years"] += 1;
+      }
     }
 
-    const scopedCases = await prisma.appraisalCase.findMany({
-      where: scopedWhere,
-      select: {
-        id: true,
-        staffId: true,
-        status: true
-      }
-    });
-
-    const staffIds = [...new Set(scopedCases.map((item) => item.staffId))];
-
-    const latestWsllByStaff = await getLatestWsllEligibilityByStaffIds(staffIds);
-    const eligibleStaffIds = staffIds.filter((staffId) => latestWsllByStaff.get(staffId)?.isEligibleForAppraisal === true);
-
-    const submittedStatuses = new Set([
-      "SUBMITTED_FOR_REVIEW",
-      ...DASHBOARD_APPROVED_STATUSES,
-      ...DASHBOARD_REJECTED_STATUSES
-    ]);
-
-    const draft = scopedCases.filter((item) => item.status === "DRAFT").length;
-    const forReview = scopedCases.filter((item) => item.status === "SUBMITTED_FOR_REVIEW").length;
-    const approved = scopedCases.filter((item) => DASHBOARD_APPROVED_STATUSES.includes(item.status)).length;
-    const rejected = scopedCases.filter((item) => DASHBOARD_REJECTED_STATUSES.includes(item.status)).length;
-    const submitted = scopedCases.filter((item) => submittedStatuses.has(item.status)).length;
-    const classificationBreakdown = await getAppraisalCategoryBreakdownForCases(scopedCases.map((item) => item.id));
+    const classificationBreakdown = await getAppraisalCategoryBreakdownForCases(canonicalRows.map((item) => item.appraisal_case_id));
 
     logHierarchyModuleDebug("dashboard.summary", viewer, {
-      scopedCaseCount: scopedCases.length,
-      eligibleCount: eligibleStaffIds.length,
+      scopedCaseCount: canonicalRows.length,
+      eligibleCount: wsllEligibleVas,
       activeCycleId: activeCycle.id
     });
 
     return res.status(200).json({
       success: true,
       data: {
-        eligible: eligibleStaffIds.length,
-        draft,
-        submitted,
+        eligible: wsllEligibleVas,
+        draft: workflowCounts.DRAFT,
+        submitted: workflowCounts.AWAITING_RM_REVIEW,
         forReview,
-        approved,
-        rejected,
+        approved: approvedCount,
+        rejected: workflowCounts.REJECTED,
+        workflowCounts: {
+          draft: workflowCounts.DRAFT,
+          rmOverrideNeeded: workflowCounts.RM_OVERRIDE_NEEDED,
+          readyForRecommendation: workflowCounts.READY_FOR_RECOMMENDATION,
+          awaitingRmReview: workflowCounts.AWAITING_RM_REVIEW,
+          clientApprovalNeeded: workflowCounts.CLIENT_APPROVAL_NEEDED,
+          rejected: workflowCounts.REJECTED,
+          approved: approvedCount,
+          payrollSubmitted: workflowCounts.PAYROLL_SUBMITTED,
+          review: forReview
+        },
+        coverage: {
+          totalVas: metrics.coverage.totalVas,
+          eligible: wsllEligibleVas,
+          notEligible: wsllNotEligibleVas,
+          overrideRequired: overrideRequiredNoWsll
+        },
+        totalVas: metrics.coverage.totalVas,
+        vasWithoutAppraisal: 0,
+        vasWithAppraisal: metrics.coverage.totalVas,
+        wsllEligibleVas,
+        wsllNotEligibleVas,
+        overrideRequiredNoWsll,
+        tenureDistribution: Object.entries(tenureBuckets).map(([name, value]) => ({ name, value })),
         activeCycleId: activeCycle.id,
         classification_breakdown: classificationBreakdown,
         hierarchy_debug: hierarchyDebug
@@ -1195,123 +1208,32 @@ app.get("/cases", async (req: Request, res: Response) => {
     const page = Math.max(1, parseInt(req.query.page as string) || 1);
     const pageSize = Math.max(1, Math.min(500, parseInt(req.query.pageSize as string) || 50));
     // Filter parameters
-    const caseStatus = (req.query.caseStatus as string)?.trim() || (req.query.status as string)?.trim();
-    const search = (req.query.search as string)?.trim();
-    const staffRole = (req.query.staffRole as string)?.trim();
-    const contactType = (req.query.contactType as string)?.trim();
+    const workflowStage = (req.query.workflowStage as string)?.trim();
+    const normalizedRole = (req.query.normalizedRole as string)?.trim();
     const company = (req.query.company as string)?.trim();
     const wsllStatusFilter = (req.query.wsllStatus as string)?.trim().toUpperCase();
     const includeRemoved = req.query.includeRemoved === "true";
 
-    const { items: cases, total } = await getScopedEmployees(viewer, {
+    const canonicalRows = await getCanonicalAppraisalDataset({
+      viewer,
       cycleId: activeCycle.id,
-      includeRemoved,
-      status: caseStatus,
-      search,
-      staffRole,
-      contactType,
+      includeRemoved
+    });
+
+    const filteredRows = filterCanonicalAppraisalDataset(canonicalRows, {
+      workflowStage,
+      normalizedRole,
       company,
-      page,
-      pageSize
+      wsllStatus: wsllStatusFilter
     });
 
-    const staffIds = [...new Set(cases.map((c) => c.staffId))];
-    const workingDataByStaffId = await getWorkingDataBatch(staffIds);
-
-    const rawItems = cases.map((c) => {
-      const wd = workingDataByStaffId.get(c.staffId);
-      const currentBase = wd?.currentCompensation ?? Number(c.compCurrent?.baseSalary || 0);
-      const submittedTargetSalary =
-        c.recommendation?.submittedTargetSalary !== null && c.recommendation?.submittedTargetSalary !== undefined
-          ? Number(c.recommendation.submittedTargetSalary)
-          : null;
-      const finalTargetSalary =
-        c.recommendation?.finalTargetSalary !== null && c.recommendation?.finalTargetSalary !== undefined
-          ? Number(c.recommendation.finalTargetSalary)
-          : null;
-      const submittedIncreaseAmount =
-        c.recommendation?.submittedIncreaseAmount !== null && c.recommendation?.submittedIncreaseAmount !== undefined
-          ? Number(c.recommendation.submittedIncreaseAmount)
-          : null;
-      const finalIncreaseAmount =
-        c.recommendation?.finalIncreaseAmount !== null && c.recommendation?.finalIncreaseAmount !== undefined
-          ? Number(c.recommendation.finalIncreaseAmount)
-          : null;
-      let finalNewBase = finalTargetSalary ?? submittedTargetSalary ?? Number(c.recommendation?.recommendedNewBase || currentBase);
-
-      // Apply override with precedence:
-      // 1) overrideNewBase (highest priority)
-      // 2) overrideAmount
-      // 3) overridePercent (lowest priority)
-      if (c.override) {
-        if (c.override.overrideNewBase !== null) {
-          finalNewBase = Number(c.override.overrideNewBase);
-        } else if (c.override.overrideAmount !== null) {
-          finalNewBase = currentBase + Number(c.override.overrideAmount);
-        } else if (c.override.overridePercent !== null) {
-          finalNewBase = currentBase * (1 + Number(c.override.overridePercent));
-        }
-      }
-
-      const wsllGateStatus: "PASS" | "MISSING_WSLL" | "WSLL_BELOW_THRESHOLD" =
-        wd?.wsllReason === "PASS"
-          ? "PASS"
-          : wd?.wsllReason === "BELOW_THRESHOLD"
-            ? "WSLL_BELOW_THRESHOLD"
-            : "MISSING_WSLL";
-      const wsllBlockerMessage =
-        wsllGateStatus === "PASS"
-          ? null
-          : wsllGateStatus === "WSLL_BELOW_THRESHOLD"
-            ? "Average WSLL is below 2.8."
-            : "WSLL data is required before a recommendation can be created.";
-      const classification = wd ? workingDataToClassification(c.id, wd) : null;
-      const rmOverrideRequired = Boolean(classification?.rmApprovalRequired);
-      const rmOverrideStatus = c.rmOverrideStatus;
-
-      const wsllStatusLabel =
-        wsllGateStatus === "PASS"
-          ? "ELIGIBLE"
-          : rmOverrideRequired && rmOverrideStatus !== "APPROVED"
-            ? "NO_WSLL_OVERRIDE_REQUIRED"
-            : "NOT_ELIGIBLE";
-
-      return {
-        id: c.id,
-        staff_id: c.staffId,
-        full_name: c.fullName,
-        company: wd?.internalCompanyName ?? wd?.hubspotCompanyName ?? c.companyName ?? null,
-        staff_role: wd?.hubspotRole ?? c.staffRole,
-        normalized_role: wd?.normalizedRole ?? null,
-        contact_type: c.contactType,
-        success_manager: wd?.successManagerName ?? null,
-        relationship_manager: wd?.reportingManagerName ?? null,
-        status: c.status,
-        created_at: c.createdAt,
-        updated_at: c.updatedAt,
-        closed_at: c.closeDate,
-        wsll_gate_status: wsllGateStatus,
-        wsll_status_label: wsllStatusLabel,
-        wsll_average: wd?.latestWsllAverage ?? null,
-        wsll_blocker_message: wsllBlockerMessage,
-        rm_override_status: rmOverrideStatus,
-        appraisal_classification: classification,
-        proposed_increase_amount: finalIncreaseAmount ?? submittedIncreaseAmount,
-        final_new_base: finalNewBase
-      };
-    });
-
-    const items = wsllStatusFilter
-      ? rawItems.filter((item) => {
-          if (wsllStatusFilter === "ELIGIBLE") return item.wsll_status_label === "ELIGIBLE";
-          if (wsllStatusFilter === "NOT_ELIGIBLE") return item.wsll_status_label === "NOT_ELIGIBLE";
-          if (wsllStatusFilter === "NO_WSLL_OVERRIDE_REQUIRED") return item.wsll_status_label === "NO_WSLL_OVERRIDE_REQUIRED";
-          return true;
-        })
-      : rawItems;
+    const total = filteredRows.length;
+    const startIndex = (page - 1) * pageSize;
+    const endIndex = startIndex + pageSize;
+    const items = filteredRows.slice(startIndex, endIndex).map(toCaseListItem);
 
     logHierarchyModuleDebug("cases.list", viewer, {
-      total: wsllStatusFilter ? items.length : total,
+      total,
       returnedCount: items.length,
       page,
       pageSize,
@@ -1333,6 +1255,42 @@ app.get("/cases", async (req: Request, res: Response) => {
       success: false,
       error: {
         message: error instanceof Error ? error.message : "Failed to fetch cases"
+      }
+    });
+  }
+});
+
+app.get("/cases/filters/normalized-roles", async (req: Request, res: Response) => {
+  try {
+    const activeCycle = await ensureActiveCycle();
+    const viewer = await resolveScopedViewer(req);
+
+    if (!viewer) {
+      return res.status(400).json({
+        success: false,
+        error: {
+          message: "Missing required query parameters: viewerRole and viewer identity (viewerEmail, viewerId, or viewerName for scoped roles)"
+        }
+      });
+    }
+
+    const rows = await getCanonicalAppraisalDataset({
+      viewer,
+      cycleId: activeCycle.id,
+      includeRemoved: false
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        options: ["ALL", ...getDistinctNormalizedRoles(rows)]
+      }
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: {
+        message: error instanceof Error ? error.message : "Failed to fetch normalized role options"
       }
     });
   }
@@ -1413,6 +1371,7 @@ app.get("/cases/by-staff/:staffId/workflow", async (req: Request, res: Response)
 
 app.get("/review-queue", async (req: Request, res: Response) => {
   try {
+    const activeCycle = await ensureActiveCycle();
     const viewer = await resolveScopedViewer(req);
     if (!viewer) {
       return res.status(400).json({
@@ -1425,10 +1384,20 @@ app.get("/review-queue", async (req: Request, res: Response) => {
 
     const hierarchyDebug = await getHierarchyDebugForViewer(req, viewer);
 
-    const items = await getReviewQueue(viewer);
+    const canonicalRows = await getCanonicalAppraisalDataset({
+      viewer,
+      cycleId: activeCycle.id,
+      includeRemoved: false
+    });
+
+    const scopedCaseIds = canonicalRows.map((row) => row.appraisal_case_id);
+
+    const items = await getReviewQueue(viewer, { scopedCaseIds });
 
     logHierarchyModuleDebug("review.queue", viewer, {
-      reviewQueueCount: items.length
+      reviewQueueCount: items.length,
+      activeCycleId: activeCycle.id,
+      canonicalScopedCaseCount: scopedCaseIds.length
     });
 
     return res.status(200).json({
@@ -1437,9 +1406,10 @@ app.get("/review-queue", async (req: Request, res: Response) => {
       hierarchy_debug: hierarchyDebug
     });
   } catch (error) {
+    console.error("[GET /review-queue] Failed to fetch review queue", error);
     return res.status(500).json({
       success: false,
-      error: { message: error instanceof Error ? error.message : "Failed to fetch review queue" }
+      error: { message: "Unable to load review items right now. Please refresh or try again." }
     });
   }
 });
@@ -1493,9 +1463,10 @@ app.get("/review-queue/history", async (req: Request, res: Response) => {
       hierarchy_debug: hierarchyDebug
     });
   } catch (error) {
+    console.error("[GET /review-queue/history] Failed to fetch review history", error);
     return res.status(500).json({
       success: false,
-      error: { message: error instanceof Error ? error.message : "Failed to fetch review history" }
+      error: { message: "Unable to load review history right now. Please refresh or try again." }
     });
   }
 });

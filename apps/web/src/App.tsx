@@ -17,6 +17,7 @@ import {
   clearViewerSession,
   canAccessPage
 } from './utils/auth';
+import { type WorkflowStageFilter } from './utils/workflowStage';
 
 const normalizeEmail = (email: string): string => email.trim().toLowerCase();
 
@@ -45,7 +46,7 @@ function App() {
   const [isCheckingSession, setIsCheckingSession] = useState(true);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [selectedStaffId, setSelectedStaffId] = useState<string | null>(null);
-  const [caseStatusFilterFromDashboard, setCaseStatusFilterFromDashboard] = useState<string>('ALL');
+  const [caseStatusFilterFromDashboard, setCaseStatusFilterFromDashboard] = useState<WorkflowStageFilter>('ALL');
   const [caseFilterVersion, setCaseFilterVersion] = useState<number>(0);
 
   // Check for existing session on mount
@@ -95,7 +96,7 @@ function App() {
     setCurrentPage(pageId);
   };
 
-  const handleDashboardNavigate = (destination: 'cases' | 'review-queue', caseStatusFilter?: string) => {
+  const handleDashboardNavigate = (destination: 'cases' | 'review-queue', caseStatusFilter?: WorkflowStageFilter) => {
     if (destination === 'cases') {
       setCaseStatusFilterFromDashboard(caseStatusFilter || 'ALL');
       setCaseFilterVersion((prev) => prev + 1);

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { ViewerSession } from '../utils/auth';
 import { formatCompensation, getPhpToAudRate } from '../utils/currencyDisplay';
+import { getWorkflowStageFromStatus, getWorkflowStageLabel } from '../utils/workflowStage';
 import styles from './ReviewQueuePage.module.css';
 
 type ReviewDecision = 'APPROVE_AS_SUBMITTED' | 'OVERRIDE_AND_APPROVE' | 'REJECT';
@@ -97,6 +98,33 @@ const formatDate = (value: string | null | undefined) => {
   });
 };
 
+const getGuardrailMessage = (guardrailLevel: GuardrailLevel | null | undefined): string => {
+  if (guardrailLevel === 'Green') {
+    return 'Within recommended range';
+  }
+
+  if (guardrailLevel === 'Yellow') {
+    return 'Manager justification required before submission';
+  }
+
+  if (guardrailLevel === 'Red') {
+    return 'Executive approval required before submission';
+  }
+
+  return 'Additional review required before submission';
+};
+
+const REVIEW_QUEUE_LOAD_ERROR_MESSAGE = 'Unable to load review items right now. Please refresh or try again.';
+const REVIEW_HISTORY_LOAD_ERROR_MESSAGE = 'Unable to load review history right now. Please refresh or try again.';
+
+const formatHistoryWorkflowStatus = (status: string | null | undefined) => {
+  if (!status) {
+    return '—';
+  }
+
+  return getWorkflowStageLabel(getWorkflowStageFromStatus(status));
+};
+
 const buildOverridePreview = (currentSalary: number | null, inputMode: OverrideInputMode, inputValue: string) => {
   const parsed = Number(inputValue);
   if (currentSalary === null || !Number.isFinite(currentSalary) || !Number.isFinite(parsed)) {
@@ -186,7 +214,7 @@ export function ReviewQueuePage({ viewerSession }: ReviewQueuePageProps) {
 
       if (!response.ok) {
         setQueue([]);
-        setQueueError(payload?.error?.message || 'Failed to load review queue');
+        setQueueError(payload?.error?.message || REVIEW_QUEUE_LOAD_ERROR_MESSAGE);
         return;
       }
 
@@ -199,7 +227,7 @@ export function ReviewQueuePage({ viewerSession }: ReviewQueuePageProps) {
       }
     } catch {
       setQueue([]);
-      setQueueError('Failed to load review queue');
+      setQueueError(REVIEW_QUEUE_LOAD_ERROR_MESSAGE);
     } finally {
       setLoadingQueue(false);
     }
@@ -252,7 +280,7 @@ export function ReviewQueuePage({ viewerSession }: ReviewQueuePageProps) {
         if (!response.ok) {
           setHistory([]);
           setHistoryTotal(0);
-          setHistoryError(payload?.error?.message || 'Failed to load review history');
+          setHistoryError(payload?.error?.message || REVIEW_HISTORY_LOAD_ERROR_MESSAGE);
           return;
         }
 
@@ -261,7 +289,7 @@ export function ReviewQueuePage({ viewerSession }: ReviewQueuePageProps) {
       } catch {
         setHistory([]);
         setHistoryTotal(0);
-        setHistoryError('Failed to load review history');
+        setHistoryError(REVIEW_HISTORY_LOAD_ERROR_MESSAGE);
       } finally {
         setLoadingHistory(false);
       }
@@ -524,7 +552,7 @@ export function ReviewQueuePage({ viewerSession }: ReviewQueuePageProps) {
                 >
                   <div className={styles.queueItemTop}>
                     <strong>{item.employeeName}</strong>
-                    <span className={styles.guardrailBadge}>{item.reasonForReview || item.guardrailLevel || '—'}</span>
+                    <span className={styles.guardrailBadge}>{item.reasonForReview || getGuardrailMessage(item.guardrailLevel as GuardrailLevel) || '—'}</span>
                   </div>
                   <div className={styles.queueMeta}>{item.client} • {item.role}</div>
                   <div className={styles.queueMetrics}>
@@ -554,7 +582,7 @@ export function ReviewQueuePage({ viewerSession }: ReviewQueuePageProps) {
                     <h2 className={styles.caseTitle}>{workflow.fullName}</h2>
                     <p className={styles.caseSubtext}>{workflow.staffId} • {workflow.companyName || selectedItem?.client || '—'} • Current Salary {formatCompensation(workflow.currentSalary, { view: 'review-queue', caseStatus: workflow.status, conversionRate: phpToAudRate })}</p>
                   </div>
-                  <div className={styles.statusChip}>{workflow.status.replace(/_/g, ' ')}</div>
+                  <div className={styles.statusChip}>{getWorkflowStageLabel(getWorkflowStageFromStatus(workflow.status))}</div>
                 </div>
 
                 {isRmOverrideTask ? (
@@ -610,8 +638,8 @@ export function ReviewQueuePage({ viewerSession }: ReviewQueuePageProps) {
                       <strong>{formatPercent(workflow.submittedRecommendation?.increasePercent)}</strong>
                     </div>
                     <div>
-                      <span className={styles.label}>Guardrail Level</span>
-                      <strong>{workflow.submittedRecommendation?.guardrailLevel || '—'}</strong>
+                      <span className={styles.label}>Guardrail Guidance</span>
+                      <strong>{getGuardrailMessage((workflow.submittedRecommendation?.guardrailLevel || null) as GuardrailLevel | null)}</strong>
                     </div>
                     <div>
                       <span className={styles.label}>Submitted</span>
@@ -704,10 +732,10 @@ export function ReviewQueuePage({ viewerSession }: ReviewQueuePageProps) {
                       </div>
                       <div>
                         <span className={styles.label}>Guardrail</span>
-                        <strong>{guardrailLoading ? 'Evaluating…' : guardrailResult?.guardrailLevel || '—'}</strong>
+                        <strong>{guardrailLoading ? 'Evaluating…' : getGuardrailMessage(guardrailResult?.guardrailLevel || null)}</strong>
                       </div>
                     </div>
-                    {guardrailResult ? <p className={styles.guardrailText}>{guardrailResult.actionRequired}</p> : null}
+                    {guardrailResult ? <p className={styles.guardrailText}>{getGuardrailMessage(guardrailResult.guardrailLevel)}</p> : null}
                   </div>
                 ) : null}
 
@@ -791,6 +819,7 @@ export function ReviewQueuePage({ viewerSession }: ReviewQueuePageProps) {
                 <table className={styles.historyTable}>
                   <thead>
                     <tr>
+                      <th>Case ID</th>
                       <th>Employee</th>
                       <th>Company</th>
                       <th>Action Type</th>
@@ -798,18 +827,21 @@ export function ReviewQueuePage({ viewerSession }: ReviewQueuePageProps) {
                       <th>New Status</th>
                       <th>Reviewed By</th>
                       <th>Date</th>
+                      <th>Comment</th>
                     </tr>
                   </thead>
                   <tbody>
                     {history.map((item) => (
                       <tr key={item.id}>
+                        <td>{item.caseId}</td>
                         <td>{item.employeeName}</td>
                         <td>{item.company || '—'}</td>
                         <td>{item.actionType.replace(/_/g, ' ')}</td>
-                        <td>{item.previousStatus.replace(/_/g, ' ')}</td>
-                        <td>{item.newStatus.replace(/_/g, ' ')}</td>
+                        <td>{formatHistoryWorkflowStatus(item.previousStatus)}</td>
+                        <td>{formatHistoryWorkflowStatus(item.newStatus)}</td>
                         <td>{item.actionBy}{item.actionRole ? ` (${item.actionRole})` : ''}</td>
                         <td>{formatDate(item.actionTimestamp)}</td>
+                        <td>{item.comment || '—'}</td>
                       </tr>
                     ))}
                   </tbody>

@@ -10,6 +10,7 @@ import {
 } from "./appraisalClassificationService";
 import { getOrBuildWorkingData, getWorkingDataBatch, workingDataToClassification } from "./employeeWorkingDataService";
 import { logSystemAction } from "./dataIntegrityCorrectionService";
+import { getStatusesForCanonicalWorkflowStage } from "./workflowStageService";
 
 const prisma = new PrismaClient();
 
@@ -597,19 +598,46 @@ export async function getCaseWorkflowByCaseId(caseId: string) {
   return mapWorkflowSummary(caseId);
 }
 
-export async function getReviewQueue(viewer: { name: string; role: string; email?: string; id?: string }) {
+export async function getReviewQueue(
+  viewer: { name: string; role: string; email?: string; id?: string },
+  options?: { scopedCaseIds?: string[] }
+) {
   const scopedRole = normalizeScopedRole(viewer.role);
   if (!scopedRole) {
     return [];
   }
 
-  const reviewStatuses: string[] = ["SUBMITTED_FOR_REVIEW", "AWAITING_RM_OVERRIDE_APPROVAL"];
+  const reviewStatuses = [
+    ...(getStatusesForCanonicalWorkflowStage("AWAITING_RM_REVIEW") ?? []),
+    ...(getStatusesForCanonicalWorkflowStage("RM_OVERRIDE_NEEDED") ?? [])
+  ];
+
+  const validCaseStatuses = new Set<string>(Object.values(CaseStatus));
+  const prismaReviewStatuses = [...new Set(reviewStatuses)].filter((status) =>
+    validCaseStatuses.has(String(status).trim().toUpperCase())
+  ) as CaseStatus[];
+
+  if (prismaReviewStatuses.length === 0) {
+    return [];
+  }
+
+  const scopedCaseIds = [...new Set((options?.scopedCaseIds ?? []).filter(Boolean))];
+  if (options?.scopedCaseIds && scopedCaseIds.length === 0) {
+    return [];
+  }
 
   const whereClause: Prisma.AppraisalCaseWhereInput | null =
     scopedRole === "REVIEWER"
       ? {
           isRemoved: false,
-          OR: reviewStatuses.map((status) => ({ status: status as any }))
+          ...(scopedCaseIds.length > 0
+            ? {
+                id: {
+                  in: scopedCaseIds
+                }
+              }
+            : {}),
+          OR: prismaReviewStatuses.map((status) => ({ status }))
         }
       : await (async () => {
           const baseWhere = await getScopedCaseWhere(
@@ -631,8 +659,17 @@ export async function getReviewQueue(viewer: { name: string; role: string; email
           return {
             AND: [
               baseWhere,
+              ...(scopedCaseIds.length > 0
+                ? [
+                    {
+                      id: {
+                        in: scopedCaseIds
+                      }
+                    }
+                  ]
+                : []),
               {
-                OR: reviewStatuses.map((status) => ({ status: status as any }))
+                OR: prismaReviewStatuses.map((status) => ({ status }))
               }
             ]
           } as Prisma.AppraisalCaseWhereInput;

@@ -1,9 +1,11 @@
 import { Router, type Request, type Response } from "express";
 import { CanonicalHierarchyRole } from "@prisma/client";
+import { PrismaClient } from "@prisma/client";
 import { getSMDirectory, getRMDirectory, syncEmployeeDirectory, getAdminDirectory } from "./services/employeeDirectoryService";
 import { runDataQualityChecks } from "./services/dataQualityService";
 import { resolveViewerHierarchy } from "./services/hierarchyResolutionService";
 import { ViewerNotFoundError, resolveViewerByEmail } from "./services/viewerResolutionService";
+import { getCanonicalAppraisalDataset, getCanonicalDatasetMetrics } from "./services/canonicalAppraisalDatasetService";
 import {
   backfillCanonicalHierarchyMappings,
   listUnresolvedCanonicalHierarchyMappings,
@@ -14,6 +16,7 @@ import { exportLearnedRecords } from "./services/learnedDataPersistenceService";
 import { logSystemAction } from "./services/dataIntegrityCorrectionService";
 
 const router = Router();
+const prisma = new PrismaClient();
 
 interface StaffRow {
   hubspot_id: string;
@@ -68,6 +71,47 @@ const parseCanonicalRole = (value: string | null | undefined): CanonicalHierarch
   return CanonicalHierarchyRole.UNSCOPED;
 };
 
+const getCanonicalScopeSummary = async (viewer: {
+  role: string;
+  name?: string | null;
+  email?: string | null;
+  id?: string | null;
+}): Promise<{ total_sm_count: number; total_va_count: number } | null> => {
+  const activeCycle = await prisma.cycle.findFirst({
+    where: {
+      isActive: true
+    },
+    orderBy: {
+      updatedAt: "desc"
+    },
+    select: {
+      id: true
+    }
+  });
+
+  if (!activeCycle) {
+    return null;
+  }
+
+  const rows = await getCanonicalAppraisalDataset({
+    viewer,
+    cycleId: activeCycle.id,
+    includeRemoved: false
+  });
+
+  const metrics = getCanonicalDatasetMetrics(rows);
+  const totalSmCount = new Set(
+    rows
+      .map((row) => String(row.manager_sm ?? "").trim().toLowerCase())
+      .filter(Boolean)
+  ).size;
+
+  return {
+    total_sm_count: totalSmCount,
+    total_va_count: metrics.coverage.totalVas
+  };
+};
+
 /**
  * GET /directory/viewer/:email
  * Resolve viewer by email and return their directory scope
@@ -85,6 +129,12 @@ router.get("/viewer/:email", async (req: Request, res: Response) => {
 
     if (resolvedViewer.scopedRole === "SITE_LEAD") {
       const adminDirectory = await getAdminDirectory();
+      const canonicalScopeSummary = await getCanonicalScopeSummary({
+        role: resolvedViewer.scopedRole,
+        name: resolvedViewer.fullName,
+        email: resolvedViewer.normalizedEmail,
+        id: null
+      });
 
       return res.status(200).json({
         viewer_type: "Admin",
@@ -99,7 +149,7 @@ router.get("/viewer/:email", async (req: Request, res: Response) => {
           canViewPayrollExport: true,
           canViewAdminConsole: true
         },
-        scope_summary: {
+        scope_summary: canonicalScopeSummary ?? {
           total_sm_count: adminDirectory.success_managers.length,
           total_va_count: adminDirectory.virtual_assistants.length
         },
@@ -136,12 +186,18 @@ router.get("/viewer/:email", async (req: Request, res: Response) => {
 
     if (hierarchy.scopedRole === "SUCCESS_MANAGER") {
       const virtualAssistants = hierarchy.vaRecords.map(mapDirectoryRecordToStaffRow);
+      const canonicalScopeSummary = await getCanonicalScopeSummary({
+        role: hierarchy.scopedRole,
+        name: viewerName,
+        email: viewerEmail,
+        id: hierarchy.resolvedViewerRecord?.staffId ?? null
+      });
 
       return res.status(200).json({
         viewer_type: "SM",
         viewer_email: viewerEmail,
         viewer_name: viewerName,
-        scope_summary: {
+        scope_summary: canonicalScopeSummary ?? {
           total_sm_count: 1,
           total_va_count: virtualAssistants.length
         },
@@ -153,12 +209,18 @@ router.get("/viewer/:email", async (req: Request, res: Response) => {
 
     const successManagers = hierarchy.smRecords.map(mapDirectoryRecordToStaffRow);
     const virtualAssistants = hierarchy.vaRecords.map(mapDirectoryRecordToStaffRow);
+    const canonicalScopeSummary = await getCanonicalScopeSummary({
+      role: hierarchy.scopedRole,
+      name: viewerName,
+      email: viewerEmail,
+      id: hierarchy.resolvedViewerRecord?.staffId ?? hierarchy.rmOwner?.id ?? null
+    });
 
     return res.status(200).json({
       viewer_type: "RM",
       viewer_email: viewerEmail,
       viewer_name: viewerName,
-      scope_summary: {
+      scope_summary: canonicalScopeSummary ?? {
         total_sm_count: successManagers.length,
         total_va_count: virtualAssistants.length
       },

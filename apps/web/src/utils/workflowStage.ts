@@ -1,0 +1,65 @@
+export const WORKFLOW_STAGE_OPTIONS = [
+  'ALL',
+  'DRAFT',
+  'RM_OVERRIDE_NEEDED',
+  'READY_FOR_RECOMMENDATION',
+  'AWAITING_RM_REVIEW',
+  'CLIENT_APPROVAL_NEEDED',
+  'APPROVED',
+  'REJECTED',
+  'PAYROLL_SUBMITTED'
+] as const;
+
+export type WorkflowStageFilter = (typeof WORKFLOW_STAGE_OPTIONS)[number];
+
+const STATUS_TO_STAGE: Record<string, WorkflowStageFilter> = {
+  RM_OVERRIDE_NEEDED: 'RM_OVERRIDE_NEEDED',
+  READY_FOR_RECOMMENDATION: 'READY_FOR_RECOMMENDATION',
+  AWAITING_RM_REVIEW: 'AWAITING_RM_REVIEW',
+  CLIENT_APPROVAL_NEEDED: 'CLIENT_APPROVAL_NEEDED',
+  PAYROLL_SUBMITTED: 'PAYROLL_SUBMITTED',
+  DRAFT: 'DRAFT',
+  AWAITING_RM_OVERRIDE_APPROVAL: 'RM_OVERRIDE_NEEDED',
+  RM_OVERRIDE_APPROVED_PENDING_RECOMMENDATION: 'READY_FOR_RECOMMENDATION',
+  SUBMITTED_FOR_REVIEW: 'AWAITING_RM_REVIEW',
+  IN_REVIEW: 'AWAITING_RM_REVIEW',
+  SUBMITTED: 'AWAITING_RM_REVIEW',
+  REVIEW_APPROVED: 'CLIENT_APPROVAL_NEEDED',
+  AWAITING_CLIENT_APPROVAL: 'CLIENT_APPROVAL_NEEDED',
+  PENDING_CLIENT_APPROVAL: 'CLIENT_APPROVAL_NEEDED',
+  CLIENT_PENDING: 'CLIENT_APPROVAL_NEEDED',
+  APPROVED: 'APPROVED',
+  CLIENT_APPROVED: 'APPROVED',
+  SITE_LEAD_APPROVED: 'APPROVED',
+  REVIEW_REJECTED: 'REJECTED',
+  REJECTED: 'REJECTED',
+  SUBMITTED_TO_PAYROLL: 'PAYROLL_SUBMITTED',
+  PAYROLL_PENDING: 'PAYROLL_SUBMITTED',
+  PAYROLL_PROCESSED: 'PAYROLL_SUBMITTED',
+  RELEASED_TO_PAYROLL: 'PAYROLL_SUBMITTED'
+};
+
+const STAGE_LABELS: Record<WorkflowStageFilter, string> = {
+  ALL: 'Workflow: All',
+  DRAFT: 'Draft',
+  RM_OVERRIDE_NEEDED: 'RM Override Needed',
+  READY_FOR_RECOMMENDATION: 'Ready for Recommendation',
+  AWAITING_RM_REVIEW: 'Awaiting RM Review',
+  CLIENT_APPROVAL_NEEDED: 'Client Approval Needed',
+  APPROVED: 'Approved',
+  REJECTED: 'Rejected',
+  PAYROLL_SUBMITTED: 'Payroll Submitted'
+};
+
+export const getWorkflowStageLabel = (stage: WorkflowStageFilter | string): string => {
+  const normalized = String(stage || '').toUpperCase() as WorkflowStageFilter;
+  return STAGE_LABELS[normalized] || String(stage || '').replace(/_/g, ' ');
+};
+
+export const getWorkflowStageFromStatus = (status: string | null | undefined): WorkflowStageFilter => {
+  if (!status) {
+    return 'DRAFT';
+  }
+
+  return STATUS_TO_STAGE[status] || 'DRAFT';
+};

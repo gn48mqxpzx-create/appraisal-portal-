@@ -1,29 +1,49 @@
 import { useEffect, useMemo, useState } from 'react';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import { ViewerSession } from '../utils/auth';
+import { type WorkflowStageFilter } from '../utils/workflowStage';
 
 interface AppraisalMetrics {
-  eligible: number;
-  draft: number;
-  submitted: number;
-  forReview: number;
-  approved: number;
-  rejected: number;
+  workflowCounts: {
+    review: number;
+    rmOverrideNeeded: number;
+    readyForRecommendation: number;
+    awaitingRmReview: number;
+    clientApprovalNeeded: number;
+    rejected: number;
+    approved: number;
+  };
+  coverage: {
+    totalVas: number;
+    eligible: number;
+    notEligible: number;
+    overrideRequired: number;
+  };
+  totalVas: number;
 }
 
 interface DashboardProps {
   viewerSession: ViewerSession | null;
-  onNavigate: (destination: 'cases' | 'review-queue', caseStatusFilter?: string) => void;
+  onNavigate: (destination: 'cases' | 'review-queue', caseStatusFilter?: WorkflowStageFilter) => void;
 }
 
 export function Dashboard({ viewerSession, onNavigate }: DashboardProps) {
   const [metrics, setMetrics] = useState<AppraisalMetrics>({
-    eligible: 0,
-    draft: 0,
-    submitted: 0,
-    forReview: 0,
-    approved: 0,
-    rejected: 0
+    workflowCounts: {
+      review: 0,
+      rmOverrideNeeded: 0,
+      readyForRecommendation: 0,
+      awaitingRmReview: 0,
+      clientApprovalNeeded: 0,
+      rejected: 0,
+      approved: 0
+    },
+    coverage: {
+      totalVas: 0,
+      eligible: 0,
+      notEligible: 0,
+      overrideRequired: 0
+    },
+    totalVas: 0
   });
   const [loadingMetrics, setLoadingMetrics] = useState(false);
 
@@ -72,33 +92,66 @@ export function Dashboard({ viewerSession, onNavigate }: DashboardProps) {
         const payload = await response.json().catch(() => ({}));
         if (!response.ok) {
           setMetrics({
-            eligible: 0,
-            draft: 0,
-            submitted: 0,
-            forReview: 0,
-            approved: 0,
-            rejected: 0
+            workflowCounts: {
+              review: 0,
+              rmOverrideNeeded: 0,
+              readyForRecommendation: 0,
+              awaitingRmReview: 0,
+              clientApprovalNeeded: 0,
+              rejected: 0,
+              approved: 0
+            },
+            coverage: {
+              totalVas: 0,
+              eligible: 0,
+              notEligible: 0,
+              overrideRequired: 0
+            },
+            totalVas: 0
           });
           return;
         }
 
         const apiData = payload?.data || {};
+        const workflowCounts = apiData.workflowCounts || {};
+        const coverage = apiData.coverage || {};
+
         setMetrics({
-          eligible: Number(apiData.eligible || 0),
-          draft: Number(apiData.draft || 0),
-          submitted: Number(apiData.submitted || 0),
-          forReview: Number(apiData.forReview || 0),
-          approved: Number(apiData.approved || 0),
-          rejected: Number(apiData.rejected || 0)
+          workflowCounts: {
+            review: Number(workflowCounts.review || apiData.forReview || 0),
+            rmOverrideNeeded: Number(workflowCounts.rmOverrideNeeded || 0),
+            readyForRecommendation: Number(workflowCounts.readyForRecommendation || 0),
+            awaitingRmReview: Number(workflowCounts.awaitingRmReview || 0),
+            clientApprovalNeeded: Number(workflowCounts.clientApprovalNeeded || 0),
+            rejected: Number(workflowCounts.rejected || apiData.rejected || 0),
+            approved: Number(workflowCounts.approved || apiData.approved || 0)
+          },
+          coverage: {
+            totalVas: Number(coverage.totalVas || apiData.totalVas || 0),
+            eligible: Number(coverage.eligible || apiData.wsllEligibleVas || 0),
+            notEligible: Number(coverage.notEligible || apiData.wsllNotEligibleVas || 0),
+            overrideRequired: Number(coverage.overrideRequired || apiData.overrideRequiredNoWsll || 0)
+          },
+          totalVas: Number(apiData.totalVas || coverage.totalVas || 0)
         });
       } catch {
         setMetrics({
-          eligible: 0,
-          draft: 0,
-          submitted: 0,
-          forReview: 0,
-          approved: 0,
-          rejected: 0
+          workflowCounts: {
+            review: 0,
+            rmOverrideNeeded: 0,
+            readyForRecommendation: 0,
+            awaitingRmReview: 0,
+            clientApprovalNeeded: 0,
+            rejected: 0,
+            approved: 0
+          },
+          coverage: {
+            totalVas: 0,
+            eligible: 0,
+            notEligible: 0,
+            overrideRequired: 0
+          },
+          totalVas: 0
         });
       } finally {
         setLoadingMetrics(false);
@@ -108,56 +161,39 @@ export function Dashboard({ viewerSession, onNavigate }: DashboardProps) {
     void loadDashboardSummary();
   }, [viewerSession]);
 
-  const pipelineData = [
-    { name: 'Draft', value: metrics.draft, fill: '#e8e8e8' },
-    { name: 'Submitted', value: metrics.submitted, fill: '#b3d9ff' },
-    { name: 'For Review', value: metrics.forReview, fill: '#ffb3ba' },
-    { name: 'Approved', value: metrics.approved, fill: '#baf8ba' },
-    { name: 'Rejected', value: metrics.rejected, fill: '#ffb3ba' }
-  ];
+  const summaryCards = useMemo(() => {
+    const isSm = viewerSession?.role === 'SM';
 
-  const getTenureBuckets = () => {
-    if (!viewerSession?.virtual_assistants) return [];
-
-    const now = new Date();
-    const buckets = {
-      '0-1 years': 0,
-      '1-3 years': 0,
-      '3-5 years': 0,
-      '5+ years': 0
-    };
-
-    viewerSession.virtual_assistants.forEach((va: any) => {
-      const startDate = va.staffStartDate ? new Date(va.staffStartDate) : null;
-      if (!startDate || isNaN(startDate.getTime())) return;
-
-      const yearsDiff = (now.getTime() - startDate.getTime()) / (365.25 * 24 * 60 * 60 * 1000);
-
-      if (yearsDiff < 1) buckets['0-1 years']++;
-      else if (yearsDiff < 3) buckets['1-3 years']++;
-      else if (yearsDiff < 5) buckets['3-5 years']++;
-      else buckets['5+ years']++;
-    });
-
-    return Object.entries(buckets).map(([name, value]) => ({ name, value }));
-  };
-
-  const rmDistributionData = (() => {
-    if (viewerSession?.viewer_type === 'RM' && viewerSession?.success_managers) {
-      const grouped: { [key: string]: number } = {};
-      viewerSession.success_managers.forEach((sm: any) => {
-        const name = sm.full_name || sm.fullName || 'Unknown';
-        grouped[name] = (grouped[name] || 0) + 1;
-      });
-      return Object.entries(grouped).map(([name, count]) => ({
-        name,
-        value: count
-      }));
+    if (isSm) {
+      return [
+        { label: 'RM Override Needed', value: metrics.workflowCounts.rmOverrideNeeded, color: '#9a3412', onClick: () => onNavigate('cases', 'RM_OVERRIDE_NEEDED' as WorkflowStageFilter) },
+        { label: 'Ready for Recommendation', value: metrics.workflowCounts.readyForRecommendation, color: '#1d4ed8', onClick: () => onNavigate('cases', 'READY_FOR_RECOMMENDATION' as WorkflowStageFilter) },
+        { label: 'Awaiting RM Review', value: metrics.workflowCounts.awaitingRmReview, color: '#92400e', onClick: () => onNavigate('cases', 'AWAITING_RM_REVIEW' as WorkflowStageFilter) },
+        { label: 'Client Approval Needed', value: metrics.workflowCounts.clientApprovalNeeded, color: '#155e75', onClick: () => onNavigate('cases', 'CLIENT_APPROVAL_NEEDED' as WorkflowStageFilter) },
+        { label: 'Rejected', value: metrics.workflowCounts.rejected, color: '#dc2626', onClick: () => onNavigate('cases', 'REJECTED' as WorkflowStageFilter) },
+        { label: 'Total VAs', value: metrics.totalVas, color: '#374151', onClick: () => onNavigate('cases', 'ALL') }
+      ];
     }
-    return [];
-  })();
 
-  const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6'];
+    return [
+      { label: 'Review', value: metrics.workflowCounts.review, color: '#f59e0b', onClick: () => onNavigate('review-queue') },
+      { label: 'Ready for Recommendation', value: metrics.workflowCounts.readyForRecommendation, color: '#1d4ed8', onClick: () => onNavigate('cases', 'READY_FOR_RECOMMENDATION' as WorkflowStageFilter) },
+      { label: 'Awaiting RM Review', value: metrics.workflowCounts.awaitingRmReview, color: '#92400e', onClick: () => onNavigate('cases', 'AWAITING_RM_REVIEW' as WorkflowStageFilter) },
+      { label: 'Client Approval Needed', value: metrics.workflowCounts.clientApprovalNeeded, color: '#155e75', onClick: () => onNavigate('cases', 'CLIENT_APPROVAL_NEEDED' as WorkflowStageFilter) },
+      { label: 'Rejected', value: metrics.workflowCounts.rejected, color: '#dc2626', onClick: () => onNavigate('cases', 'REJECTED' as WorkflowStageFilter) },
+      { label: 'Approved', value: metrics.workflowCounts.approved, color: '#16a34a', onClick: () => onNavigate('cases', 'APPROVED' as WorkflowStageFilter) }
+    ];
+  }, [metrics, onNavigate, viewerSession?.role]);
+
+  const operationalCards = useMemo(
+    () => [
+      { label: 'Total VAs', value: metrics.coverage.totalVas, color: '#374151' },
+      { label: 'Eligible', value: metrics.coverage.eligible, color: '#166534' },
+      { label: 'Not Eligible', value: metrics.coverage.notEligible, color: '#9a3412' },
+      { label: 'Override Required', value: metrics.coverage.overrideRequired, color: '#b45309' }
+    ],
+    [metrics.coverage]
+  );
 
   return (
     <div style={{ backgroundColor: '#f9fafb', minHeight: '100vh', padding: '24px' }}>
@@ -198,47 +234,16 @@ export function Dashboard({ viewerSession, onNavigate }: DashboardProps) {
         {/* Summary Cards */}
         {viewerSession && (
         <>
-          <div style={{ marginBottom: '32px', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '16px' }}>
-            {[
-              { label: 'Eligible for Appraisal', value: metrics.eligible, color: '#3b82f6' },
-              { label: 'Draft', value: metrics.draft, color: '#9ca3af' },
-              { label: 'Submitted', value: metrics.submitted, color: '#3b82f6' },
-              { label: 'For Review', value: metrics.forReview, color: '#f59e0b' },
-              { label: 'Approved', value: metrics.approved, color: '#10b981' },
-              { label: 'Rejected', value: metrics.rejected, color: '#ef4444' }
-            ].map((card) => (
+          {loadingMetrics ? <p style={{ marginBottom: '12px', fontSize: '12px', color: '#6b7280' }}>Loading live workflow data...</p> : null}
+
+          <h2 style={{ margin: '0 0 12px 0', fontSize: '14px', fontWeight: '700', color: '#374151', textTransform: 'uppercase', letterSpacing: '0.02em' }}>Workflow Status</h2>
+          <div style={{ marginBottom: '20px', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '16px' }}>
+            {summaryCards.map((card) => (
               <div
                 key={card.label}
                 role="button"
                 tabIndex={0}
-                onClick={() => {
-                  if (card.label === 'For Review') {
-                    onNavigate('review-queue');
-                    return;
-                  }
-
-                  if (card.label === 'Draft') {
-                    onNavigate('cases', 'DRAFT');
-                    return;
-                  }
-
-                  if (card.label === 'Submitted') {
-                    onNavigate('cases', 'SUBMITTED_FOR_REVIEW');
-                    return;
-                  }
-
-                  if (card.label === 'Rejected') {
-                    onNavigate('cases', 'REVIEW_REJECTED');
-                    return;
-                  }
-
-                  if (card.label === 'Approved') {
-                    onNavigate('cases', 'APPROVED');
-                    return;
-                  }
-
-                  onNavigate('cases');
-                }}
+                onClick={card.onClick}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter' || event.key === ' ') {
                     event.preventDefault();
@@ -264,83 +269,27 @@ export function Dashboard({ viewerSession, onNavigate }: DashboardProps) {
             ))}
           </div>
 
-          {/* Charts Row */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(350px, 1fr))', gap: '16px' }}>
-            {/* Appraisal Pipeline */}
-            <div style={{ backgroundColor: '#fff', padding: '20px', borderRadius: '8px', border: '1px solid #e5e7eb' }}>
-              <h3 style={{ fontSize: '14px', fontWeight: '600', marginBottom: '16px', color: '#1f2937' }}>
-                Appraisal Pipeline
-              </h3>
-              {loadingMetrics ? <p style={{ fontSize: '12px', color: '#6b7280' }}>Loading live workflow data...</p> : null}
-              <ResponsiveContainer width="100%" height={200}>
-                <BarChart data={pipelineData}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                  <XAxis dataKey="name" tick={{ fontSize: 12 }} />
-                  <YAxis tick={{ fontSize: 12 }} />
-                  <Tooltip contentStyle={{ borderRadius: '4px', border: '1px solid #e5e7eb' }} />
-                  <Bar dataKey="value" fill="#3b82f6" radius={[4, 4, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-
-            {/* RM Distribution */}
-            {viewerSession.viewer_type === 'RM' && rmDistributionData.length > 0 && (
-              <div style={{ backgroundColor: '#fff', padding: '20px', borderRadius: '8px', border: '1px solid #e5e7eb' }}>
-                <h3 style={{ fontSize: '14px', fontWeight: '600', marginBottom: '16px', color: '#1f2937' }}>
-                  SMs in Scope
-                </h3>
-                <ResponsiveContainer width="100%" height={200}>
-                  <BarChart data={rmDistributionData}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                    <XAxis dataKey="name" tick={{ fontSize: 11 }} angle={-45} textAnchor="end" height={60} />
-                    <YAxis tick={{ fontSize: 12 }} />
-                    <Tooltip contentStyle={{ borderRadius: '4px', border: '1px solid #e5e7eb' }} />
-                    <Bar dataKey="value" fill="#10b981" radius={[4, 4, 0, 0]} />
-                  </BarChart>
-                </ResponsiveContainer>
+          <h2 style={{ margin: '0 0 12px 0', fontSize: '14px', fontWeight: '700', color: '#374151', textTransform: 'uppercase', letterSpacing: '0.02em' }}>VA Coverage</h2>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '16px' }}>
+            {operationalCards.map((card) => (
+              <div
+                key={card.label}
+                style={{
+                  backgroundColor: '#fff',
+                  padding: '16px',
+                  borderRadius: '8px',
+                  border: '1px solid #e5e7eb',
+                  textAlign: 'center'
+                }}
+              >
+                <div style={{ fontSize: '28px', fontWeight: '700', color: card.color, marginBottom: '4px' }}>
+                  {card.value}
+                </div>
+                <div style={{ fontSize: '12px', color: '#6b7280', fontWeight: '500' }}>
+                  {card.label}
+                </div>
               </div>
-            )}
-
-            {/* Status Distribution */}
-            <div style={{ backgroundColor: '#fff', padding: '20px', borderRadius: '8px', border: '1px solid #e5e7eb' }}>
-              <h3 style={{ fontSize: '14px', fontWeight: '600', marginBottom: '16px', color: '#1f2937' }}>
-                Status Distribution
-              </h3>
-              <ResponsiveContainer width="100%" height={200}>
-                <PieChart>
-                  <Pie
-                    data={pipelineData}
-                    cx="50%"
-                    cy="50%"
-                    innerRadius={50}
-                    outerRadius={80}
-                    paddingAngle={2}
-                    dataKey="value"
-                  >
-                    {pipelineData.map((entry, index) => (
-                      <Cell key={`cell-${index}`} fill={entry.fill} />
-                    ))}
-                  </Pie>
-                  <Tooltip contentStyle={{ borderRadius: '4px', border: '1px solid #e5e7eb' }} />
-                </PieChart>
-              </ResponsiveContainer>
-            </div>
-
-            {/* Tenure Distribution */}
-            <div style={{ backgroundColor: '#fff', padding: '20px', borderRadius: '8px', border: '1px solid #e5e7eb' }}>
-              <h3 style={{ fontSize: '14px', fontWeight: '600', marginBottom: '16px', color: '#1f2937' }}>
-                Tenure Distribution
-              </h3>
-              <ResponsiveContainer width="100%" height={200}>
-                <BarChart data={getTenureBuckets()}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                  <XAxis dataKey="name" tick={{ fontSize: 12 }} angle={-20} textAnchor="end" height={60} />
-                  <YAxis tick={{ fontSize: 12 }} />
-                  <Tooltip contentStyle={{ borderRadius: '4px', border: '1px solid #e5e7eb' }} />
-                  <Bar dataKey="value" fill="#8b5cf6" radius={[4, 4, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
+            ))}
           </div>
         </>
         )}

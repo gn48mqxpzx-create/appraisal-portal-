@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { ViewerSession } from '../utils/auth';
 import { formatCompensation, formatWsll, getPhpToAudRate } from '../utils/currencyDisplay';
+import { getWorkflowStageFromStatus, getWorkflowStageLabel } from '../utils/workflowStage';
 import styles from './CaseDetailPage.module.css';
 
 interface CaseDetailPageProps {
@@ -121,31 +122,34 @@ const formatAppraisalCategory = (value: string | undefined | null): string => {
     .join(' · ');
 };
 
+const getGuardrailMessage = (guardrailLevel: GuardrailLevel): string => {
+  if (guardrailLevel === 'Green') {
+    return 'Within recommended range';
+  }
+
+  if (guardrailLevel === 'Yellow') {
+    return 'Manager justification required before submission';
+  }
+
+  if (guardrailLevel === 'Red') {
+    return 'Executive approval required before submission';
+  }
+
+  return 'Additional review required before submission';
+};
+
 function GuardrailBadge({ result, loading }: { result: GuardrailResult | null; loading: boolean }) {
   if (loading) return <span style={{ fontSize: 12, color: '#9ca3af', fontStyle: 'italic' }}>Evaluating…</span>;
   if (!result) return null;
   const bg = result.colorCode + '22';
   const border = result.colorCode + '55';
   return (
-    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '4px 12px', borderRadius: 20, fontSize: 12, fontWeight: 700, backgroundColor: bg, color: result.colorCode, border: `1px solid ${border}` }}>
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '4px 12px', borderRadius: 10, fontSize: 12, fontWeight: 700, backgroundColor: bg, color: result.colorCode, border: `1px solid ${border}` }}>
       <span style={{ width: 8, height: 8, borderRadius: '50%', backgroundColor: result.colorCode, display: 'inline-block', flexShrink: 0 }} />
-      {result.guardrailLevel} — {result.actionRequired}
+      {getGuardrailMessage(result.guardrailLevel)}
     </span>
   );
 }
-
-const WORKFLOW_LABELS: Record<string, string> = {
-  DRAFT: 'Draft',
-  AWAITING_RM_OVERRIDE_APPROVAL: 'Awaiting RM Override Approval',
-  RM_OVERRIDE_APPROVED_PENDING_RECOMMENDATION: 'RM Override Approved (Recommendation Pending)',
-  SUBMITTED_FOR_REVIEW: 'Submitted for Review',
-  REVIEW_APPROVED: 'Review Approved',
-  REVIEW_REJECTED: 'Review Rejected',
-  AWAITING_CLIENT_APPROVAL: 'Awaiting Client Approval',
-  PENDING_CLIENT_APPROVAL: 'Pending Client Approval',
-  CLIENT_APPROVED: 'Client Approved',
-  SUBMITTED_TO_PAYROLL: 'Submitted to Payroll'
-};
 
 const toRecommendationType = (option: RecommendationOption) => {
   switch (option) {
@@ -402,7 +406,7 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
     ? rmOverrideApproved
       ? 'RM override approved. You may now proceed with the salary recommendation or custom adjustment for this employee.'
       : 'RM override required before recommendation.'
-    : 'Standard Review';
+    : 'Within recommended range';
 
   const recommendationBlockerMessages: Partial<Record<BenchmarkStatus, string>> = {
     MISSING_ROLE_MAPPING: 'Role must be mapped before a recommendation can be created.',
@@ -764,7 +768,7 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
         {workflowLoading ? <div className={styles.infoBanner}>Loading workflow...</div> : null}
         {workflowError ? <div className={styles.warningBanner}>{workflowError}</div> : null}
         {actionMessage ? <div className={styles.infoBanner}>{actionMessage}</div> : null}
-        {workflow ? <div className={styles.statusBanner}>{WORKFLOW_LABELS[workflow.status] || workflow.status}</div> : null}
+        {workflow ? <div className={styles.statusBanner}>{getWorkflowStageLabel(getWorkflowStageFromStatus(workflow.status))}</div> : null}
 
         <div className={styles.card}>
           <h2 className={styles.cardTitle}>Employee Profile</h2>
@@ -884,7 +888,7 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
                         {formatMarketPosition(classification.marketPosition)}
                       </span>
                       <span className={`${styles.classificationChip} ${classification.rmApprovalRequired ? styles.chipAmber : styles.chipGreen}`}>
-                        {classification.rmApprovalRequired ? (rmOverrideApproved ? 'No WSLL, RM Approved' : 'RM Override Required') : 'Standard Review'}
+                        {classification.rmApprovalRequired ? (rmOverrideApproved ? 'No WSLL, RM Approved' : 'RM Override Required') : 'Within recommended range'}
                       </span>
                     </div>
                     <div className={styles.classificationCategory}>
@@ -930,6 +934,9 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
                   </div>
                 ) : null}
 
+                {isRejected ? (
+                  <div className={styles.infoBanner}>Recommendation rejected. Update the recommendation and resubmit when ready.</div>
+                ) : null}
                 {isRejected && workflow?.finalRecommendation?.reviewerNotes ? (
                   <div className={styles.warningBanner}>Reviewer notes: {workflow.finalRecommendation.reviewerNotes}</div>
                 ) : null}
@@ -974,8 +981,8 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
                         <div className={styles.summaryValue}>{formatPercent(workflow.submittedRecommendation.increasePercent)}</div>
                       </div>
                       <div>
-                        <span className={styles.fieldLabel}>Guardrail Level</span>
-                        <div className={styles.summaryValue}>{workflow.submittedRecommendation.guardrailLevel || '—'}</div>
+                        <span className={styles.fieldLabel}>Guardrail Guidance</span>
+                        <div className={styles.summaryValue}>{workflow.submittedRecommendation.guardrailLevel ? getGuardrailMessage(workflow.submittedRecommendation.guardrailLevel as GuardrailLevel) : '—'}</div>
                       </div>
                       <div>
                         <span className={styles.fieldLabel}>Submitted At</span>
@@ -1092,10 +1099,14 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
                           <GuardrailBadge result={guardrailResult} loading={guardrailLoading} />
                         </div>
 
+                        {guardrailResult?.guardrailLevel === 'Green' ? (
+                          <div className={styles.guardrailInfoBar}>Within recommended range.</div>
+                        ) : null}
+
                         {guardrailResult?.guardrailLevel === 'Yellow' ? (
-                          <div className={styles.justificationBox}>
-                            <p className={styles.justificationTitle}>Manager Justification Required</p>
-                            <p className={styles.justificationText}>This increase falls in the Yellow guardrail band. Provide a justification before submitting.</p>
+                          <div className={styles.guardrailSoftPanel}>
+                            <p className={styles.justificationTitle}>Manager justification required</p>
+                            <p className={styles.justificationText}>Manager justification required before submission.</p>
                             <textarea
                               rows={3}
                               placeholder="Explain the business justification for this increase..."
@@ -1107,8 +1118,8 @@ export function CaseDetailPage({ staffId, viewerSession, onNavigateBack }: CaseD
                         ) : null}
 
                         {guardrailResult?.guardrailLevel === 'Red' ? (
-                          <div className={styles.benchmarkNotice}>
-                            <p className={styles.benchmarkNoticeText}>This increase exceeds the threshold. Normal submission is disabled.</p>
+                          <div className={styles.guardrailStrongPanel}>
+                            <p className={styles.benchmarkNoticeText}>Executive approval required before submission.</p>
                           </div>
                         ) : null}
                       </div>

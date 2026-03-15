@@ -27,6 +27,7 @@ export type ScopedEmployeeQueryOptions = {
   page: number;
   pageSize: number;
   status?: string;
+  statuses?: string[];
   search?: string;
   staffRole?: string;
   contactType?: string;
@@ -160,6 +161,24 @@ export async function getScopedCaseWhere(
     }
 
     whereClause.status = options.status as CaseStatus;
+  }
+
+  if (options.statuses && options.statuses.length > 0) {
+    const normalizedStatuses = options.statuses
+      .map((status) => status.trim())
+      .filter(Boolean);
+
+    if (normalizedStatuses.some((status) => !CASE_STATUSES.has(status as CaseStatus))) {
+      return {
+        id: {
+          equals: "__invalid_case_statuses_filter__"
+        }
+      };
+    }
+
+    whereClause.status = {
+      in: normalizedStatuses as CaseStatus[]
+    };
   }
 
   if (options.staffRole) {
